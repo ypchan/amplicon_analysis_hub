@@ -55,6 +55,25 @@ is_16s_amplicon.sh -i in.fq -t 16
 ---
 
 ## Command-line Workflow
+# My Project
+
+## Workflow Diagram
+
+```mermaid
+flowchart TD
+    A[file1: SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics] --> B[file2: #_batch.#_bioproject.xlsx]
+    B --> C{is 16S amplicon?}
+    C -- Yes --> D[fetch target bioproject sra metadata: file2 + file1]
+    C -- No --> E[marked is_16S as 0]
+    D --> F{is 16S amplicon data?}
+    F -- Yes --> G[download using prefetch]
+    F -- No --> H[Skip the non-16S records]
+    G --> I[convert sra to fastq fasterq-dump]
+    I --> J[fastp]
+    J --> K[cutadapt]
+    K --> L[dada2.R]
+    L --> M[rm intermediate fq files but save all summary results]
+```
 
 ### 1. Select SRA Records by BioProject Accession
 
