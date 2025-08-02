@@ -88,7 +88,9 @@ csvtk grep -t -f BioProject --pattern-file 02_batch.bioproject.list SRA_Accessio
 
 ```bash
 grep -i -v -e '_ITS2' -e 'ITS1 ' -e 'Fungal ITS' -e '_ITS_' -e '18S_NCOG' -e "18SV" -e '18S V9 amplification' -e 'COI region' -e 'COI amplification' -e '_Fi' -e '18S rDNA' -e 'cpn60 gene' -e 'ITS region' -e ' ITS1' -e '18S V4' -e '18S rRNA' -e 'ITS_000000000' 02_batch.bioproject.list.amplicon.metagenomics | sed '1d' | awk -F '\t' '{print $2"\t"$19}' > sra2bioproject.list
-cat sra2bioproject.list | awk -F '\t' '{print $1}' | rush -j 48 --continue --eta --succ-cmd-file 02_batch.bioproject.rush_prefetch.finished 'prefetch {} -O 02_batch/sra &> prefetch.log'
+
+# If the size of the amplicon data exceeds 1GB, exercise caution—it is likely not genuine amplicon data.
+cat sra2bioproject.list | awk -F '\t' '{print $1}' | rush -j 48 --continue --eta --succ-cmd-file 02_batch.bioproject.rush_prefetch.finished 'prefetch {} -O 02_batch/sra --max-size 1G &> prefetch.log'
 ```
 
 ---
