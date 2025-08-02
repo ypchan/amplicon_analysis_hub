@@ -60,6 +60,7 @@ is_16s_amplicon.sh -i in.fq -t 16
 ## Workflow Diagram
 
 ```mermaid
+%%{init: {'theme':'default', 'themeVariables': {'fontSize': '10px'}}}%%
 flowchart TD
     A[file1: SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics] --> B[file2: #_batch.#_bioproject.xlsx]
     B --> C{is 16S amplicon?}
