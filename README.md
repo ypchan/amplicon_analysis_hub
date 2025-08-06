@@ -59,23 +59,6 @@ is_16s_amplicon.sh -i in.fq -t 16
 
 ## Workflow Diagram
 
-```mermaid
-%%{init: {'theme':'default', 'themeVariables': {'fontSize': '10px'}}}%%
-flowchart TD
-    A[file1: SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics] --> B[file2: #_batch.#_bioproject.xlsx]
-    B --> C{is 16S amplicon?}
-    C -- Yes --> D[fetch target bioproject sra metadata: file2 + file1]
-    C -- No --> E[marked is_16S as 0]
-    D --> F{is 16S amplicon data?}
-    F -- Yes --> G[download using prefetch]
-    F -- No --> H[Skip the non-16S records]
-    G --> I[convert sra to fastq fasterq-dump]
-    I --> J[fastp]
-    J --> K[cutadapt]
-    K --> L[dada2.R]
-    L --> M[rm intermediate fq files but save all summary results]
-```
-
 ## Optiional steps
 ### Select SRA Records by BioProject Accession
 
@@ -100,7 +83,7 @@ cat non_16s_keywords.list | grep -w -v -f - 02_batch.bioproject.list.amplicon.me
 ### Download SRA using prefetch
 *Adjust the number of threads according to the network download speed. Too many threads will waste computing resources, while too few will underutilize the available bandwidth.*
 
-```
+```bash
 # If the size of the amplicon data exceeds 1GB, exercise caution—it is likely not genuine amplicon data.
 # $2 is SRA accession
 # if the 
@@ -109,7 +92,7 @@ cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenom
 
 ### Is downloading successful?
 
-```
+```bash
 wc -l rush_prefetch.finished
 cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | sed '1d' | wcl
 # if == Yes, prefetch successfully
