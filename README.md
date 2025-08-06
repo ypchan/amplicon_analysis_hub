@@ -39,23 +39,29 @@ A comprehensive pipeline for processing 16S rRNA gene amplicon data, including D
 
 ---
 
-## Reference Data
+## Dataset
 
 To build a 16S rRNA gene reference database for verifying FASTQ data:
-
+### 16S rRNA gene reference data
 ```bash
 wget -c https://ftp.ncbi.nlm.nih.gov/refseq/TargetedLoci/Archaea/archaea.16SrRNA.fna.gz
 wget -c https://ftp.ncbi.nlm.nih.gov/refseq/TargetedLoci/Bacteria/bacteria.16SrRNA.fna.gz
 gunzip *.gz
 cat archaea.16SrRNA.fna | awk '{print $1}' | sed 's/>/>archaea__/' > arch_bac_nr_16s_ref.fna
 makeblastdb -in arch_bac_nr_16s_ref.fna -input_type fasta -db_type nucl -out arch_bac_nr_16s_ref
-is_16s_amplicon.sh -i in.fq -t 16 
 ```
 
----
+## Command-lines
 
-## Command-line Workflow
-# My Project
+### Is the SRA data 16S amplicon sequencing?
+```bash
+is_16s_amplicon.sh -i in.fq -t 16 
+```
+```text
+$ is_16s_amplicon.sh --input ERR6876596.fastq.gz --threads 12
+sample_id            bac_hits   arch_hits  total_hits   total_percent   is_16S
+ERR6876596.fastq.gz  1000       0          1000         100.0           YES
+```
 
 ## Workflow Diagram
 
@@ -63,6 +69,7 @@ is_16s_amplicon.sh -i in.fq -t 16
 ### Select SRA Records by BioProject Accession
 
 > 02_batch.bioproject.list bioproject accession list, one per line
+
 ```bash
 # using csvtk
 csvtk grep -t -f BioProject --pattern-file 02_batch.bioproject.list SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics > 02_batch.bioplicon.metagenomics
