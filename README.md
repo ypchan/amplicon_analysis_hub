@@ -4,7 +4,7 @@ A comprehensive pipeline for processing 16S rRNA gene amplicon data, including D
 
 ---
 
-## Table of Contents
+## Troubleshooting Large-Scale Amplicon Data Analysis: Problems and Practical Fixes
 
 - [Software Dependencies](#software-dependencies)
 - [Reference Data](#reference-data)
@@ -13,9 +13,20 @@ A comprehensive pipeline for processing 16S rRNA gene amplicon data, including D
     - [2. Exclude Non-16S Records & Download](#2-exclude-non-16s-sra-records-and-download)
     - [3. Convert SRA to FASTQ](#3-convert-sra-to-fastq)
     - [4. Downstream Processing](#4-downstream-processing-with-in-house-pipeline)
-- [Work List](#work-list)
 
----
+
+## Challenges
+> 1: How to download all available 16S amplicon sequencing data as comprehensively as possible?
+
+> 2: How to tankle different sequencing platforms? Roche 454 | Illumina | Ion Torrent | Pacbio?
+
+> 3: To or not cut primers?
+
+> 4: Different regions?
+
+> 5: Ecological inchs?
+
+> 6: threshold for a quality data
 
 ## Software Dependencies
 
@@ -53,7 +64,7 @@ makeblastdb -in arch_bac_nr_16s_ref.fna -input_type fasta -db_type nucl -out arc
 
 ## Command-lines
 
-### Is the SRA data 16S amplicon sequencing?
+### Is the SRA data derived from 16S amplicon sequencing?
 ```bash
 is_16s_amplicon.sh -i in.fq -t 16 
 ```
@@ -117,16 +128,17 @@ awk '{print $2}' rush_prefetch.finished | grep -w -v -f - selectd.SRA_Accessions
 cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | awk -F '\t' '{print $2}' | rush -j 24 --continue --eta --succ-cmd-file rush_prefetch.finished 'prefetch {} -O sra &> /dev/null'
 ```
 
-### Convert SRA to FASTQ
+### SRA 2 fastq
 
 ```bash
 mkdir fq
 cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | awk -F '\t' '{print $2}' | sed '1d' | rush -j 48 --continue --eta --succ-cmd-file rush_fasterq_dump.finished 'faster1-dump sra/{1}/{1}.sra --threads 1 --split-3 --outdir fq'
+
 # if faild
 cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | awk -F '\t' '{print $2}' | sed '1d' | rush -j 48 --continue --eta --succ-cmd-file rush_fasterq_dump.finished 'faster1-dump sra/{1}/{1}.sra --threads 1 --split-3 --outdir fq'
 
-# if you want to save disk, and gzip fastq files
-ls fq/*.gz | xargs -n1 -P8 gzip
+# for saving disk, split, gzip and remove sra simultaneously
+cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | awk -F '\t' '{print $2}' | sed '1d' | rush -j 48 --continue --eta --succ-cmd-file rush_fasterq_dump.finished 'mkdir -p fq/{1} && faster1-dump sra/{1}/{1}.sra --threads 1 --split-3 --outdir fq/{1} && rm -rf sra/{1}'
 
 # get fastq files and remove sra files 
 rm -rf sra
@@ -152,26 +164,37 @@ cat sra2bioproject.list | awk -F '\t' '{print $1}' | rush -j 48 'rm -rf 02_batch
 
 ---
 
-### 4. Downstream Processing with In-house Pipeline
-
-Use the provided shell script to run `seqkit`, `fastp`, `cutadapt`, and `dada2` (supports SLURM):
-
+### dada2 by bioproject
 **Paired-end reads:**  
 ```bash
-bash dd2_pipeline.sh --input_dir 00_fq \
-        --r1_suffix _1.fastq --r2_suffix _2.fastq \
-        --threads 48 \
-        --mode PE \
-        --platform illumina
+dd2_pipeline.sh --input_dir 00_fq \
+    --r1_suffix _1.fastq --r2_suffix _2.fastq \
+    --threads 48 \
+    --mode PE \
+    --platform illumina
 ```
-
 **Single-end reads:**  
 ```bash
-bash dd2_pipeline.sh --input_dir 00_fq \
-        --r1_suffix _1.fastq \
-        --threads 48 \
-        --mode SE \
-        --platform illumina
+# illumina
+dd2_pipeline.sh --input_dir 00_fq \
+    --r1_suffix _1.fastq \
+    --threads 48 \
+    --mode SE \
+    --platform illumina
+
+# Roche 454
+d2_pipeline.sh --input_dir 00_fq \
+    --r1_suffix _1.fastq \
+    --threads 48 \
+    --mode SE \
+    --platform 454
+
+# Ion torrent
+d2_pipeline.sh --input_dir 00_fq \
+    --r1_suffix _1.fastq \
+    --threads 48 \
+    --mode SE \
+    --platform iontorrent
 ```
 
 ### Were the paired-end reads properly merged??
@@ -190,12 +213,6 @@ Sample Count                : 502
 ⚠️  Suggestion: More than 25% of samples have low merged and nonchim rates. Switch to SE analysis may improve results.
 ```
 
----
 
-## Work List
 
-- chen: project 1-200 `in progress` ![status](https://img.shields.io/badge/status-in%20progress-yellow)
-- chen: check metadata `in progress` ![status](https://img.shields.io/badge/status-in%20progress-yellow)
-
----
 
