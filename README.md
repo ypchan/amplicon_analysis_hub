@@ -62,6 +62,7 @@ is_16s_amplicon.sh -i in.fq -t 16
 ## Optiional steps
 ### Select SRA Records by BioProject Accession
 
+> 02_batch.bioproject.list bioproject accession list, one per line
 ```bash
 # using csvtk
 csvtk grep -t -f BioProject --pattern-file 02_batch.bioproject.list SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics > 02_batch.bioplicon.metagenomics
@@ -74,14 +75,14 @@ cat 02_batch.bioproject.list | grep -w -f - SRA_Accessions.tab.live.run.public.a
 ### Exclude Non-16S SRA Records
 if need, please add more specific filtering string, exclusively match non-16s records
 
-*Non-16s keywords are listed in data/non_16s_keywords.list*
+> Non-16s keywords are listed in data/non_16s_keywords.list
 ```bash
 cat non_16s_keywords.list | grep -w -v -f - 02_batch.bioproject.list.amplicon.metagenomics | sed '1d' > selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s
 ```
 
 
 ### Download SRA using prefetch
-*Adjust the number of threads according to the network download speed. Too many threads will waste computing resources, while too few will underutilize the available bandwidth.*
+> Adjust the number of threads according to the network download speed. Too many threads will waste computing resources, while too few will underutilize the available bandwidth.
 
 ```bash
 # If the size of the amplicon data exceeds 1GB, exercise caution—it is likely not genuine amplicon data.
