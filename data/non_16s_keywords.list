@@ -23,5 +23,20 @@ ITS4
 Fungi 
 -ITS\t
 \tCOI
+PacBio 
+OXFORD_NANOPORE
+ITS1
+ITS2
+rbcL
+__trnH\t
+__ITS\t
+__ITS3\t
+12S 
+23S 
+23s 
+28S 
+18S 
+-ITS\t
+
 
 

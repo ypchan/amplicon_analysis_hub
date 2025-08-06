@@ -76,38 +76,78 @@ flowchart TD
     L --> M[rm intermediate fq files but save all summary results]
 ```
 
-### 1. Select SRA Records by BioProject Accession
+## Optiional steps
+### Select SRA Records by BioProject Accession
 
 ```bash
+# using csvtk
 csvtk grep -t -f BioProject --pattern-file 02_batch.bioproject.list SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics > 02_batch.bioplicon.metagenomics
+
+# or use grep
+head -n 1 SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics > 02_batch.bioplicon.metagenomics # header line
+cat 02_batch.bioproject.list | grep -w -f - SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics >> 02_batch.bioplicon.metagenomics
 ```
 
----
+### Exclude Non-16S SRA Records
+if need, please add more specific filtering string, exclusively match non-16s records
 
-### 2. Exclude Non-16S SRA Records and Download
-
+*Non-16s keywords are listed in data/non_16s_keywords.list*
 ```bash
-grep -i -v -e '_ITS2' -e 'ITS1 ' -e 'Fungal ITS' -e '_ITS_' -e '18S_NCOG' -e "18SV" -e '18S V9 amplification' -e 'COI region' -e 'COI amplification' -e '_Fi' -e '18S rDNA' -e 'cpn60 gene' -e 'ITS region' -e ' ITS1' -e '18S V4' -e '18S rRNA' -e 'ITS_000000000' 02_batch.bioproject.list.amplicon.metagenomics | sed '1d' | awk -F '\t' '{print $2"\t"$19}' > sra2bioproject.list
+cat non_16s_keywords.list | grep -w -v -f - 02_batch.bioproject.list.amplicon.metagenomics | sed '1d' > selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s
+```
 
+
+### Download SRA using prefetch
+*Adjust the number of threads according to the network download speed. Too many threads will waste computing resources, while too few will underutilize the available bandwidth.*
+
+```
 # If the size of the amplicon data exceeds 1GB, exercise caution—it is likely not genuine amplicon data.
-cat sra2bioproject.list | awk -F '\t' '{print $1}' | rush -j 48 --continue --eta --succ-cmd-file 02_batch.bioproject.rush_prefetch.finished 'prefetch {} -O 02_batch/sra --max-size 1G &> prefetch.log'
+# $2 is SRA accession
+# if the 
+cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | awk -F '\t' '{print $2}' | rush -j 24 --continue --eta --succ-cmd-file rush_prefetch.finished 'prefetch {} -O sra &> /dev/null'
 ```
 
----
+### Is downloading successful?
 
-### 3. Convert SRA to FASTQ
+```
+wc -l rush_prefetch.finished
+cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | sed '1d' | wcl
+# if == Yes, prefetch successfully
+# if != No, some failed
 
-Verify all records are downloaded:
+#  if !=, checked failed ones
+awk '{print $2}' rush_prefetch.finished | grep -w -v -f - selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s 
 
-```bash
-cat sra2bioproject.list | awk -F '\t' '{print $1}' | wc -l
-wc -l 02_batch.bioproject.rush_prefetch.finished
+# if failed due to internet broken,
+# remove the broken ones, if exist,
+awk '{print $2}' rush_prefetch.finished | grep -w -v -f - selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | awk -F '\t' '{print $2}' | sed '1d' | rush -j 4 'rm -rf sra/{1}'
+
+#  continue the failed ones
+cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | awk -F '\t' '{print $2}' | rush -j 24 --continue --eta --succ-cmd-file rush_prefetch.finished 'prefetch {} -O sra &> /dev/null'
 ```
 
-Split SRA files into FASTQ:
+### Convert SRA to FASTQ
 
 ```bash
-cat sra2bioproject.list | awk -F '\t' '{print $1}' | rush -j 48 --continue --eta --succ-cmd-file 02_batch.bioproject.rush_faterq_dump.finished 'fasterq-dump --threads 1 {} -O 02_batch/sra'
+mkdir fq
+cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | awk -F '\t' '{print $2}' | sed '1d' | rush -j 48 --continue --eta --succ-cmd-file rush_fasterq_dump.finished 'faster1-dump sra/{1}/{1}.sra --threads 1 --split-3 --outdir fq'
+# if faild
+cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | awk -F '\t' '{print $2}' | sed '1d' | rush -j 48 --continue --eta --succ-cmd-file rush_fasterq_dump.finished 'faster1-dump sra/{1}/{1}.sra --threads 1 --split-3 --outdir fq'
+
+# if you want to save disk, and gzip fastq files
+ls fq/*.gz | xargs -n1 -P8 gzip
+
+# get fastq files and remove sra files 
+rm -rf sra
+```
+
+### Arrange fq by bioproject
+
+```bash
+# create bioproject directory name after biopject accession
+cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | sed '1d' | awk -F '\t' '{print $19}' | sort -u | xargs -I {} mkdir -p {}/00_fq
+
+cat selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | sed '1d' | awk -F '\t' '{print $2,$19}' | rush -j 4 --eta --verbose 'mv fq/{}(_[12])?.fastq(.gz)? {2}/00_fq/'
 ```
 
 Remove SRA files and their parent directories (use with caution):
@@ -141,6 +181,22 @@ bash dd2_pipeline.sh --input_dir 00_fq \
         --threads 48 \
         --mode SE \
         --platform illumina
+```
+
+### Were the paired-end reads properly merged??
+```bash
+# scripts/amplicon_reads_lost_check.sh
+amplicon_reads_lost_check.sh -i track.summary.tsv -o reads_lost_ratio.details.tsv
+```
+
+```text
+$ cat reads_lost_ratio.summary.tsv
+Sample Count                : 502
+  nonchim reads left ≥ 50%  : 125
+  merged reads ≥ 50%        : 130
+  reads retained < 50%      : 372
+
+⚠️  Suggestion: More than 25% of samples have low merged and nonchim rates. Switch to SE analysis may improve results.
 ```
 
 ---
