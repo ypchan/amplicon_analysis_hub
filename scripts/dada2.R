@@ -1,9 +1,9 @@
-#!/home/conda_envs/dada2/bin/Rscript
+#!/usr/bin/env Rscript
 
 # ------------------------------------------------------------
 # DADA2 Amplicon Processing Pipeline (PE or SE mode)
 # Author: yanpengch@qq.com
-# Date: 2025-07-23 (latest)
+# Date: 2025-08-07 (latest)
 # Usage:
 #   dada2.R -i <input_dir> -o <output_dir> -m pe|se [options]
 # Description:
@@ -43,10 +43,10 @@ Options:
 
 Examples:
   # Single‑end Illumina, 4 threads
-  dada2.R -i 02_cutadapt -o 03_dada2 -m se -t 4 -1 _R1.fq.gz
+  dada2.R -i 02_cutadapt -o 03_dada2 -m se -t 4 -1 .fastq.gz
 
   # Paired‑end IonTorrent with custom suffixes
-  dada2.R -i 02_cutadapt -o 03_dada2 -m pe -1 _read1.fq.gz -2 _read2.fq.gz -P iontorrent
+  dada2.R -i 02_cutadapt -o 03_dada2 -m pe -1 _1.fastq.gz -2 _2.fastq.gz -P iontorrent
 
 Output (in <output_dir>):
   dada2_filtered/       Filtered FASTQ files
@@ -60,7 +60,7 @@ spec <- matrix(c(
     'input_dir',     'i', 1, "character",  'Path to directory with input FASTQ files, required',
     'output_dir',    'o', 1, "character",  'Path to output directory, required',
     'mode',          'm', 1, "character",  'Processing mode: "pe" or "se", required',
-    'reads1_suffix', '1', 1, "character",  'Suffix for forward reads (default: _R1.fq.gz)',
+    'reads1_suffix', '1', 1, "character",  'Suffix for forward reads (default: _1.fastq.gz)',
     'reads2_suffix', '2', 1, "character",  'Suffix for reverse reads (only for PE)',
     'threads',       't', 1, "integer",    'Number of CPU threads to use (default: 4)',
     'platform',      'P', 1, "character",  'Sequencing platform: illumina|454|iontorrent (default: illumina)',
@@ -76,12 +76,13 @@ if (!is.null(opt$help) || is.null(opt$input_dir) || is.null(opt$output_dir) || i
 }
 
 # Remove possible trailing slashes from input and output directories
-opt$input_dir <- sub("/+$", "", opt$input_dir)
+opt$input_dir  <- sub("/+$", "", opt$input_dir)
 opt$output_dir <- sub("/+$", "", opt$output_dir)
 
 # Set default values for optional parameters
-opt$threads <- ifelse(is.null(opt$threads), 4, opt$threads)
-opt$reads1_suffix <- ifelse(is.null(opt$reads1_suffix), "_R1.fq.gz", opt$reads1_suffix)
+opt$threads       <- ifelse(is.null(opt$threads), 4, opt$threads)
+opt$reads1_suffix <- ifelse(is.null(opt$reads1_suffix), "_1.fastq.gz", opt$reads1_suffix)
+
 opt$mode <- tolower(opt$mode)
 if (!opt$mode %in% c("se", "pe")) {
     stop("Unsupported mode: ", opt$mode)
@@ -91,7 +92,7 @@ if (opt$mode == "pe" ) {
     if ( is.null(opt$reads2_suffix) ) {
         stop("For paired-end mode, please specify the reverse read suffix with -2 or --reads2_suffix")
     }
-} 
+}
 
 opt$platform <- tolower(ifelse(is.null(opt$platform), "illumina", opt$platform))
 if (!opt$platform %in% c("illumina", "454", "iontorrent")) {
@@ -100,11 +101,11 @@ if (!opt$platform %in% c("illumina", "454", "iontorrent")) {
 
 # define function to calculate elapsed time
 elapsed_time <- function(start_time) {
-    end_time <- Sys.time()
+    end_time     <- Sys.time()
     elapsed_secs <- as.numeric(difftime(end_time, start_time, units = "secs"))
-    ours   <- elapsed_secs %/% 3600
-    minutes <- (elapsed_secs %% 3600) %/% 60
-    seconds <- round(elapsed_secs %% 60)
+    ours         <- elapsed_secs %/% 3600
+    minutes      <- (elapsed_secs %% 3600) %/% 60
+    seconds      <- round(elapsed_secs %% 60)
     return(sprintf("%02d:%02d:%02d", ours, minutes, seconds))
 }
 
@@ -117,11 +118,11 @@ log_step <- function(..., sep = " ") {
 # Output start time and parameters
 start_time0 <- Sys.time()
 log_step("Starting DADA2 pipeline")
-cat("    Input directory:", opt$input_dir, "\n")
+cat("    Input directory:",  opt$input_dir,  "\n")
 cat("    Output directory:", opt$output_dir, "\n")
-cat("    Processing mode:", opt$mode, "\n")
-cat("    Threads:", opt$threads, "\n")
-cat("    Platform:", opt$platform, "\n")
+cat("    Processing mode:",  opt$mode,       "\n")
+cat("    Threads:",          opt$threads,    "\n")
+cat("    Platform:",         opt$platform,   "\n")
 
 # Create output directory if it doesn't exist
 if (!dir.exists(opt$output_dir)) {
@@ -130,7 +131,7 @@ if (!dir.exists(opt$output_dir)) {
 
 # Prepare input files
 fastqFs <- list.files(opt$input_dir, pattern = paste0(opt$reads1_suffix,"$"), full.names = TRUE)
-sample_names <- sub(opt$reads1_suffix, "", basename(fastqFs), fixed=TRUE)
+sample_names <- sub(paste0(opt$reads1_suffix,"$"), "", basename(fastqFs))
 names(fastqFs) <- sample_names
 sample_count <- length(sample_names)
 cat("    Sample number:", sample_count, "\n")
@@ -149,6 +150,7 @@ if (opt$mode == "pe") {
     filtRs <- file.path(filtpathR, basename(fastqRs))
     names(filtRs) <- sample_names
 }
+failed_sample_lst <- file.path(opt$output_dir, "filterAndTrim_failed_samples.tsv")
 
 # -------------------------------
 # Single-End processing
@@ -182,13 +184,19 @@ if (opt$mode == "se") {
     # in case of some sample failed filtering, remove them from the list
     if (any(filter_out[,"reads.out"] == 0)) {
         failed_fqs <- rownames(filter_out)[filter_out[,"reads.out"] == 0]
-        log_step("Warning: The following fastq files had no reads after filtering and will be removed:", paste(failed_samples, collapse=", "))
-        suf_pat <- paste0(opt$reads1_suffix,"$")
-        failed_samples <- sub(suf_pat, "", basename(failed_fqs))
+        failed_samples <- sub(paste0(opt$reads1_suffix,"$"), "", failed_fqs)
+        if (length(failed_samples) >0 ) {
+            write.table(failed_samples, file=failed_sample_lst, quote=FALSE, row.names=FALSE, col.names=FALSE)
+            log_step("Warning: The following samples had no reads after filtering and will be removed:", paste(failed_samples, collapse=", "))
+        } else {
+            failed_samples <- character(0)
+        }
+
         filtFs <- filtFs[!names(filtFs) %in% failed_samples]
         sample_names <- sample_names[!sample_names %in% failed_samples]
         filter_out <- filter_out[!rownames(filter_out) %in% failed_fqs, ]
     }
+
     log_step("Step2: learnErrors")
     errF <- learnErrors(filtFs, multithread=opt$threads, randomize=TRUE)
     run_time <- elapsed_time(start_time)
@@ -243,11 +251,17 @@ if (opt$mode == "se") {
 
     if (any(filter_out[,"reads.out"] == 0)) {
         failed_fqs <- rownames(filter_out)[filter_out[,"reads.out"] == 0]
+
         log_step("Warning: The following fastq files had no reads after filtering and will be removed:", paste(failed_fqs, collapse=", "))
         # Remove failed samples from the lists
         suf_pat <- paste0("(", opt$reads1_suffix, "|", opt$reads2_suffix, ")$")
-        failed_samples <- unique(sub(suf_pat, "", basename(failed_fqs)))
-        log_step("Warning: The following samples after filtering and will be removed:", paste(failed_samples, collapse=", "))
+        failed_samples <- unique(sub(suf_pat, "", failed_fqs))
+        if (length(failed_samples) >0 ) {
+            write.table(failed_samples, file=failed_sample_lst, quote=FALSE, row.names=FALSE, col.names=FALSE)
+            log_step("Warning: The following samples had no reads after filtering and will be removed:", paste(failed_samples, collapse=", "))
+        } else {
+            failed_samples <- character(0)
+        }
         filtFs <- filtFs[!names(filtFs) %in% failed_samples]
         filtRs <- filtRs[!names(filtRs) %in% failed_samples]
         failed_sample_fqs <- c(paste0(failed_samples, opt$reads1_suffix),paste0(failed_samples, opt$reads1_suffix))
