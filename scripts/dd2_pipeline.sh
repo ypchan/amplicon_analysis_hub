@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 
 # ───────────────────────────────────────────────
-# 🧪 DADA2 Amplicon Processing Pipeline  (Full Auto Version)
-# Date: 2025-8-5
+# 🧪 DADA2 Amplicon Pipeline (Full Auto Version)
 # Author: yanpengch@qq.com
 # Description: From raw FASTQ to ASV table using fastp, cutadapt and DADA2
 # ───────────────────────────────────────────────
@@ -10,192 +9,157 @@
 # ──────────────── Usage Function ────────────────
 usage() {
   cat <<EOF
-dd2_pipeline.sh — Automated DADA2 amplicon analysis pipeline
+dada2_pipeline.sh: Process amplicon sequencing data with DADA2.
 
-📋 Workflow Overview:
-    1️⃣  fastp         - Quality filtering and read trimming
-    2️⃣  cutadapt      - Primer detection and trimming
-    3️⃣  DADA2         - Denoising, ASV inference, chimera removal
+Steps:
+    1. fastp filtering & QC
+    2. Primer detection and trimming (cutadapt)
+    3. DADA2 denoising & ASV generation
 
-🔧 Required Parameters:
-    -i, --input_dir     <DIR>       Input directory containing raw FASTQ files
-    -1, --r1_suffix     <STR>       Suffix for R1 reads (e.g., _R1.fq.gz)
+Usage: dada2_pipeline.sh [options]
 
-⚙️ Optional Parameters:
-    -2, --r2_suffix     <STR>       Suffix for R2 reads (required if mode=PE)
-    -m, --mode          <SE|PE>     Sequencing mode: Single-End or Paired-End (default: PE)
-    -p, --platform      <STR>       Sequencing platform: illumina, 454, iontorrent (default: illumina)
-    -t, --threads       <INT>       Number of threads to use (default: 4)
-    -r, --step          <INT>       Run specific step only:
-                                      1=fastp, 2=cutadapt, 3=dada2, 0=all (default: 0)
-    -s, --submit        <true|false> Submit DADA2 step via SLURM (default: false)
-    -h, --help                      Show this help message and exit
-
-📤 Example:
-    dd2_pipeline.sh -i ./raw_data -1 _R1.fq.gz -2 _R2.fq.gz -m PE -t 8 -r 0
-
+Required options:
+    -i, --input_dir           Input directory with raw FASTQ files
+    -1, --r1_suffix           R1 FASTQ suffix (e.g. _R1.fq.gz)
+Optional options:
+    -2, --r2_suffix           R2 suffix (required if mode=PE)
+    -t, --threads             Number of threads (default: 4)
+    -m, --mode                SE or PE (default: PE)
+    -p, --platform            Platform: illumina, 454, iontorrent (default: illumina)
+    -s, --slurm              Submit DADA2 job via SLURM (default: false)
+    -h, --help                Show this message
 EOF
   exit 1
 }
 
-# ────────────── Parse Command-Line Arguments ──────────────
-OPTIONS=i:1:2:t:m:p:r:sh
-LONGOPTS=input_dir:,r1_suffix:,r2_suffix:,threads:,mode:,platform:,step:,submit,help
-
-PARSED=$(getopt --options=$OPTIONS --longoptions=$LONGOPTS --name "$0" -- "$@") || exit 2
-eval set -- "$PARSED"
-
-# ────────────── Default Parameters ──────────────
+# ─────────────── Default Parameters ─────────────
 threads=4
 mode="PE"
 platform="illumina"
-step=0
-submit=false
-primer_file="/home/data/t170527/database/16s_primer.tsv"
 
-# ────────────── Read User Parameters ──────────────
+# ─────────────── Parse Arguments ────────────────
+ARGS=$(getopt -o i:1:2:t:m:p:hs --long input_dir:,r1_suffix:,r2_suffix:,threads:,mode:,platform:,help,slurm -n 'dada2_pipeline.sh' -- "$@")
+[[ $? -ne 0 ]] && usage
+eval set -- "$ARGS"
+
 while true; do
   case "$1" in
-    -i|--input_dir) input_dir="$2"; shift 2 ;;
-    -1|--r1_suffix) r1_suffix="$2"; shift 2 ;;
-    -2|--r2_suffix) r2_suffix="$2"; shift 2 ;;
-    -t|--threads) threads="$2"; shift 2 ;;
-    -m|--mode) mode="$2"; shift 2 ;;
-    -p|--platform) platform="$2"; shift 2 ;;
-    -r|--step) step="$2"; shift 2 ;;
-    -s|--submit) submit=true; shift ;;
-    -h|--help) usage ;;
+    -i|--input_dir)   input_dir="$2"; shift 2 ;;
+    -1|--r1_suffix)   r1_suffix="$2"; shift 2 ;;
+    -2|--r2_suffix)   r2_suffix="$2"; shift 2 ;;
+    -t|--threads)     threads="$2"; shift 2 ;;
+    -m|--mode)        mode="$2"; shift 2 ;;
+    -p|--platform)    platform="$2"; shift 2 ;;
+    -s|--slurm)       slurm=true; shift ;;
+    -h|--help)        usage ;;
     --) shift; break ;;
-    *) echo "❌ Invalid option: $1" >&2; exit 3 ;;
+    *) echo "Unknown option: $1"; usage ;;
   esac
 done
 
-# ────────────── Validate Required Inputs ──────────────
-[[ -z "$input_dir" || -z "$r1_suffix" ]] && echo "❌ Required parameters missing." >&2 && usage
-
+# ─────────────── Validate Input ────────────────
+mode=$(echo "$mode" | tr '[:upper:]' '[:lower:]')
+[[ -z "$input_dir" ]] && echo "❌ Missing --input_dir" && usage
+[[ -z "$r1_suffix" ]] && echo "❌ Missing --r1_suffix" && usage
+[[ "$mode" == "pe" && -z "$r2_suffix" ]] && echo " ❌ --r2_suffix is required in PE mode" && usage
 
 # ─────────────── Logging Functions ─────────────
-log() { echo "$(date '+[%F %T]') $*" }
-
+log() {
+  echo "$(date '+[%F %T]') $*"
+}
 elapsed() {
   local s=$1; local e=$(date +%s)
   printf "Elapsed time: %02d:%02d:%02d\n" $(( (e-s)/3600 )) $(( ((e-s)%3600)/60 )) $(( (e-s)%60 ))
 }
 
-# ────────────── Log Configuration Summary ──────────────
-log "🔧 Pipeline Configuration:"
-echo "  Input directory    : $input_dir"
-echo "  R1 suffix          : $r1_suffix"
-echo "  R2 suffix          : $r2_suffix"
-echo "  Mode               : $mode"
-echo "  Threads            : $threads"
-echo "  Platform           : $platform"
-echo "  Step               : $step"
-echo "  Submit via SLURM   : $submit"
+echo '''
+          🧬 DADA2 Amplicon Pipeline
+╭──────────────────────────────────────────────╮
+│   Raw Reads   →   QC   →   Trim   →   ASV    │
+│      │            │         │          │     │
+│     🔬           🧼        ✂️        📊    │
+╰──────────────────────────────────────────────╯
+'''
 
-
-# ────────────── Step 1: FASTQ Stats and fastp ──────────────
-if [[ "$step" == 0 || "$step" == 1 ]]; then
-  log "📊 Step 1: FASTQ statistics and fastp QC"
-  start_t=$(date +%s)
-  mkdir -p 01_fastp
-
-  # Generate sample list and input files
-  sample_list=$(find "$input_dir" -name "*$r1_suffix" -exec basename {} \; | sed "s/$r1_suffix//")
-  fq_files=("$input_dir"/*"$r1_suffix")
-  [[ "$mode" == "PE" ]] && fq_files+=("$input_dir"/*"$r2_suffix")
-
-  # Run seqkit for statistics
-  seqkit stats -j "$threads" "${fq_files[@]}" > 01_fastp/seqkit.stat.tsv
-  log "✅ Seqkit finished. $(elapsed $start_t)"
-
-  # Define fastp common options
-  fastp_opts="--thread 1 --length_required 100 --n_base_limit 0 --cut_tail \
---qualified_quality_phred 20 --unqualified_percent_limit 20 \
---html /dev/null --json /dev/null"
-
-  # Build rush command per mode
-  if [[ "$mode" == "PE" ]]; then
-    rush_vars="-v r1=\"$r1_suffix\",r2=\"$r2_suffix\",input_dir=\"$input_dir\""
-    fastp_cmd="fastp -i {input_dir}/{1}{r1} -I {input_dir}/{1}{r2} \
--o 01_fastp/{1}{r1} -O 01_fastp/{1}{r2} $fastp_opts &> 01_fastp/{1}.fastp.log"
-  else
-    rush_vars="-v r1=\"$r1_suffix\",input_dir=\"$input_dir\""
-    fastp_cmd="fastp -i {input_dir}/{1}{r1} -o 01_fastp/{1}{r1} $fastp_opts &> 01_fastp/{1}.fastp.log"
-  fi
-
-  # Execute fastp in parallel
-  echo "$sample_list" | rush -j "$threads" $rush_vars \
-    -c --eta --succ-cmd-file fastp.rush.done "$fastp_cmd"
-
-  # Summarize fastp logs
-  log "📊 Summarizing fastp results"
-  summary="01_fastp/fastp.summary.tsv"
-  [[ "$mode" == "PE" ]] && echo -e "sample\tR1_in\tR2_in\tR1_out\tR2_out\tinsert" > "$summary" || echo -e "sample\tR1_in\tR1_out" > "$summary"
-
-  for log_file in 01_fastp/*.fastp.log; do
-    sample=$(basename "$log_file" .fastp.log)
-    if [[ "$mode" == "PE" ]]; then
-      awk '
-        /Read1 before filtering:/ {getline; r1in=$3}
-        /Read2 before filtering:/ {getline; r2in=$3}
-        /Read1 after filtering:/ {getline; r1out=$3}
-        /Read2 after filtering:/ {getline; r2out=$3}
-        /Insert size peak/ {insert=$NF}
-        END {printf "%s\t%s\t%s\t%s\t%s\t%s\n", sample, r1in, r2in, r1out, r2out, insert}
-      ' sample="$sample" "$log_file" >> "$summary"
-    else
-      awk '
-        /Read1 before filtering:/ {getline; r1in=$3}
-        /Read1 after filtering:/ {getline; r1out=$3}
-        END {printf "%s\t%s\t%s\n", sample, r1in, r1out}
-      ' sample="$sample" "$log_file" >> "$summary"
-    fi
-  done
-  log "✅ fastp finished. $(elapsed $start_t)"
+# ─────────────── Step 1: fastp ─────────────────
+log "🧼 Step 1: stat fq statisics using seqkit stats"
+start_t=$(date +%s)
+if [[ "$mode" == "se" ]]; then
+    seqkit stats -j "$threads" $(ls "$input_dir"/*"$r1_suffix") | sed "s/$input_dir\///;s/$r1_suffix//" > seqkit.stat.tsv
+else
+    seqkit stats -j "$threads" $(ls "$input_dir"/*"$r1_suffix"; ls "$input_dir"/*"$r2_suffix" ) | sed "s/$input_dir\///;s/$r1_suffix//;s/$r2_suffix//" > seqkit.stat.tsv
 fi
 
-# ────────────── Step 2: cutadapt ──────────────
-if [[ "$step" == 0 || "$step" == 2 ]]; then
-  log "✂️  Step 2: Primer trimming with cutadapt"
-  start_t=$(date +%s)
-  mkdir -p 02_cutadapt
+mkdir -p 01_fastp
 
-  # Build primer options from primer file
-  fwd_primers=$(awk '$1=="forward" {printf "-g %s=^%s ", $2, $3}' "$primer_file")
-  rev_primers=$(awk '$1=="reverse" {printf "-G %s=^%s ", $2, $3}' "$primer_file")
-  all_primers=$(awk '$1~/^(forward|reverse)$/ {printf "-g %s=^%s ", $2, $3}' "$primer_file")
+log "🧼 fastp to filter bad reads"
+sample_list=$(find "$input_dir" -name "*$r1_suffix" -exec basename {} \; | sed "s/$r1_suffix//")
 
-  # Run cutadapt
-  if [[ "$mode" == "PE" ]]; then
-    cut_opts="$fwd_primers $rev_primers --revcomp -j 1"
-    rush_cmd="cutadapt $cut_opts -o 02_cutadapt/{1}${r1_suffix} -p 02_cutadapt/{1}${r2_suffix} 01_fastp/{1}${r1_suffix} 01_fastp/{1}${r2_suffix} &> 02_cutadapt/{1}.cutadapt.log"
-    rush_vars="-v r1=\"$r1_suffix\",r2=\"$r2_suffix\""
-  else
-    cut_opts="$all_primers --revcomp -j 1"
-    rush_cmd="cutadapt $cut_opts -o 02_cutadapt/{1}${r1_suffix} 01_fastp/{1}${r1_suffix} &> 02_cutadapt/{1}.cutadapt.log"
-    rush_vars="-v r1=\"$r1_suffix\""
-  fi
-
-  echo "$sample_list" | rush -j "$threads" $rush_vars -c --eta --succ-cmd-file cutadapt.rush.done "$rush_cmd"
-
-  # Summarize primer usage
-  log "📊 Summarizing primer usage"
-  summarize_cutadapt.py -d 02_cutadapt -m "$mode" -t "$threads"
-
-  log "✅ cutadapt finished. $(elapsed $start_t)"
+if [[ "$mode" == "pe" ]]; then
+  echo "$sample_list" | rush -j "$threads" -v r1="$r1_suffix",r2="$r2_suffix",input_dir="$input_dir" -c --eta --succ-cmd-file fastp.rush.finished 'fastp -i {input_dir}/{1}{r1} -I {input_dir}/{1}{r2} -o 01_fastp/{1}{r1} -O 01_fastp/{1}{r2} --thread 1 --length_required 100 --n_base_limit 0 --cut_tail --qualified_quality_phred 20 --unqualified_percent_limit 20 --html /dev/null --json /dev/null &> 01_fastp/{1}.fastp.log'
+else
+  echo "$sample_list" | rush -j "$threads" -v r1="$r1_suffix",input_dir="$input_dir" -c --eta --succ-cmd-file fastp.rush.finished 'fastp -i {input_dir}/{1}{r1} -o 01_fastp/{1}{r1} --thread 1 --length_required 100 --n_base_limit 0 --cut_tail --qualified_quality_phred 20 --unqualified_percent_limit 20 --html /dev/null --json /dev/null &> 01_fastp/{1}.fastp.log'
 fi
 
-# ────────────── Step 3: DADA2 ──────────────
-if [[ "$step" == 0 || "$step" == 3 ]]; then
-  log "🧬 Step 3: Running DADA2 (R)"
-  mkdir -p 03_dada2
-  dd_cmd="dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode $mode --reads1_suffix $r1_suffix --threads $threads --platform $platform"
-  [[ "$mode" == "PE" ]] && dd_cmd+=" --reads2_suffix $r2_suffix"
+# Summarize logs
+log "🧼 summary fastp results"
+if [[ "$mode" == "pe" ]]; then
+  awk_cmd='
+    /Read1 before filtering:/ { getline; r1in=$3 }
+    /Read2 before filtering:/ { getline; r2in=$3 }
+    /Read1 after filtering:/ { getline; r1out=$3 }
+    /Read2 after filtering:/ { getline; r2out=$3 }
+    /Insert size peak/ { insert=$NF }
+    END { print sample, r1in, r2in, r1out, r2out, insert }'
+else
+  awk_cmd='
+    /Read1 before filtering:/ { getline; r1in=$3 }
+    /Read1 after filtering:/ { getline; r1out=$3 }
+    END { print sample, r1in, r1out }'
+fi
 
-  if [[ "$submit" == true ]]; then
-    log "📤 Submitting DADA2 job via SLURM"
-    cat > dada2.slurm.sh <<EOF
+> fastp.filter.tsv
+for f in 01_fastp/*.fastp.log; do
+  sample=$(basename "$f" .fastp.log)
+  sample=$sample
+  awk -v sample="$sample" "$awk_cmd" "$f" >> fastp.filter.tsv
+done
+
+log "$(elapsed $start_t)"
+
+# ─────────────── Step 2: cutadapt ──────────────
+log "✂️  Step 2: cutadapt primer trimming"
+start_t=$(date +%s)
+mkdir -p 02_cutadapt
+primer_file="/home/data/t170527/database/16s_primer.tsv"
+
+f_primers=$(grep '^forward' "$primer_file" | while read a b c d; do echo "-g ${b}=^${c}";done | xargs)
+r_primerss=$(grep '^reverse' "$primer_file" | while read a b c d; do echo "-G ${b}=^${c}";done | xargs)
+fr_primers=$(grep -e '^forward' -e '^reverse' "$primer_file" | while read a b c d; do echo "-g ${b}=^${c}";done | xargs)
+
+if [[ "$mode" == "pe" ]]; then
+  cutadapt_opts="$f_primers $r_primerss --revcomp -j 1"
+  echo "$sample_list" | rush -j "$threads" -v r1="$r1_suffix",r2="$r2_suffix",opt="${cutadapt_opts}" -c --eta --succ-cmd-file cutadapt.rush.finished 'cutadapt {opt} -o 02_cutadapt/{1}{r1} -p 02_cutadapt/{1}{r2} 01_fastp/{1}{r1} 01_fastp/{1}{r2} &> 02_cutadapt/{1}.cutadapt.log'
+else
+  cutadapt_opts="$fr_primers --revcomp -j 1"
+  echo "$sample_list" | rush -j "$threads" -v r1="$r1_suffix",opt="${cutadapt_opts}" -c --eta --succ-cmd-file cutadapt.rush.finished 'cutadapt {opt} -o 02_cutadapt/{1}{r1} 01_fastp/{1}{r1} &> 02_cutadapt/{1}.cutadapt.log'
+fi
+log "$(elapsed $start_t)"
+
+log "summarize 16S rRNA gene primer use"
+if [[ $mode == "pe" ]];then
+    summarize_cutadapt.py -d 02_cutadapt/ -m PE -t 24
+else
+    summarize_cutadapt.py -d 02_cutadapt/ -m SE -t 24
+fi
+
+# ─────────────── Step 3: DADA2 ────────────────
+log "🧬 Step 3: Run DADA2 (R script)"
+mkdir -p 03_dada2
+dd_cmd="dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode $mode --reads1_suffix $r1_suffix --threads $threads --platform $platform"
+[[ "$mode" == "pe" ]] && dd_cmd+=" --reads2_suffix $r2_suffix"
+
+cat > dada2.slurm.sh <<EOF
 #!/bin/bash
 #SBATCH --job-name=dada2
 #SBATCH --partition=cn
@@ -205,19 +169,27 @@ if [[ "$step" == 0 || "$step" == 3 ]]; then
 #SBATCH --mem=500G
 #SBATCH --time=8:00:00
 
+exec 2>&1
 source /home/software/miniconda3/etc/profile.d/conda.sh
 conda activate dada2
 $dd_cmd
 EOF
-    sbatch dada2.slurm.sh
-    exit 0
-  fi
 
-  log "📋 Executing DADA2 locally"
-  log "$dd_cmd"
-  eval $dd_cmd | tee 03_dada2/dada2_run.log
-  [[ $? -ne 0 ]] && log "❌ DADA2 failed. See log for details." && exit 1
-  log "✅ DADA2 completed successfully."
+if [[ "$slurm" != true ]]; then
+  log " run DADA2: $dd_cmd"
+  rm -f dada2.slurm.sh
+  if ! eval "$dd_cmd" 2>&1 | tee dd2.log; then
+    log "❌ dada2.R failed"
+    exit 1
+  fi
+  exit 0
+else
+  log "sbatch dada2.slurm.sh"
+  if [[ ! -x dada2.slurm.sh ]]; then
+    echo "❌ dada2.slurm.sh is not executable, please check permissions"
+    exit 1
+  fi
+  sbatch dada2.slurm.sh
 fi
 
 exit 0
