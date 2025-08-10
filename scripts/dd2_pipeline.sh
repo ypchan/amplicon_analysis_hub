@@ -5,18 +5,19 @@
 # Author: yanpengch@qq.com
 # Description: From raw FASTQ to ASV table using fastp, cutadapt and DADA2
 # ───────────────────────────────────────────────
-set -Eeo pipefail
-shopt -s nullglob
 
-# ------------Defaults----------------------------
+set -Eeuo pipefail
+IFS=$'\n\t'
+
 # ─────────────── Default Parameters ─────────────
 threads=4
 mode="PE"
 platform="illumina"
-primer_file="/home/database/dada2_gtdb_ref/16s_primer.tsv"
+primer_file="/home/data/t170527/database/16s_primer.tsv"
 partition="cn"
 mem_gb=500
-walltime="5-00:00:00"
+walltime="10-00:00:00"
+slurm=false
 
 
 # ──────────────── Usage Function ────────────────
@@ -51,6 +52,7 @@ EOF
 }
 
 # ─────────────── Parse Arguments ────────────────
+# NOTE: short options -1/-2 are supported by GNU getopt
 ARGS=$(getopt -o i:1:2:t:m:p:h -l input_dir:,r1_suffix:,r2_suffix:,threads:,mode:,platform:,primer_file:,slurm,partition:,mem:,request_time:,help -n "dada2_pipeline.sh" -- "$@") || { echo "Try --help for usage." >&2; exit 1; }
 eval set -- "$ARGS"
 while true; do
@@ -73,18 +75,21 @@ while true; do
 done
 
 # ─────────────── Validate Input ────────────────
-[[ -z "$input_dir" ]] && echo "❌ Missing --input_dir" && usage
-[[ -z "$r1_suffix" ]] && echo "❌ Missing --r1_suffix" && usage
+[[ -z "${input_dir:-}" ]] && echo "❌ Missing --input_dir" && usage
+[[ -z "${r1_suffix:-}" ]] && echo "❌ Missing --r1_suffix" && usage
 
 mode=$(echo "$mode" | tr '[:upper:]' '[:lower:]')
 platform=$(echo "$platform" | tr '[:upper:]' '[:lower:]')
-if [[ "$mode" == "pe" && -z "$r2_suffix" ]]； then 
-    echo " ❌ --r2_suffix is required in PE mode"；
-    usage;
+
+if [[ "$mode" != "pe" && "$mode" != "se" ]]; then
+  echo "❌ --mode must be SE or PE (case-insensitive)"; usage
+fi
+if [[ "$mode" == "pe" && -z "${r2_suffix:-}" ]]; then
+  echo "❌  --r2_suffix is required in PE mode"; usage
 fi
 
-[[ -f "$primer_file" ]] || echo "❌ not found $primer_file" && usage
-
+# Correct precedence: fail only when file is missing
+[[ -f "$primer_file" ]] || { echo "❌ not found $primer_file"; usage; }
 
 # ─────────────── Logging Functions ─────────────
 log() {
@@ -98,7 +103,7 @@ elapsed() {
 echo '''
           🧬 DADA2 Amplicon Pipeline
 ╭──────────────────────────────────────────────╮
-│   Raw Reads   →   QC   →   Trim   →   ASV    │
+│  Raw Reads  → fastp  →  cutadapt  →  dada2   │
 ╰──────────────────────────────────────────────╯
 '''
 
@@ -106,8 +111,9 @@ echo '''
 log "🧼 Step 1: stat fq statisics using seqkit stats"
 start_t=$(date +%s)
 fqfiles=$(find "$input_dir" -type f \( -name "*$r1_suffix" -o -name "*$r2_suffix" \))
-[[ -z "$files" ]] && { echo "No matching files found."; exit 1; }
-seqkit stats -j "$threads" "$fqfiles" | sed -E "s|$input_dir/||; s|($r1_suffix|$r2_suffix)||" > seqkit.stat.tsv
+
+[[ -z "$fqfiles" ]] && { echo "No matching files found."; exit 1; }
+seqkit stats -j "$threads" $fqfiles | sed -E "s|$input_dir/||; s|($r1_suffix|$r2_suffix)||" > seqkit.stat.tsv
 log "$(elapsed $start_t)"
 
 log "🧼Step 2: QC using fastp"
@@ -133,9 +139,9 @@ fi
 sample_count=$(printf '%s\n' $sample_list | sed '/^$/d' | wc -l)
 fastp_finished_count=$(wc -l < fastp.rush.finished)
 
-if (( $sample_count != $fastp_finished_count )) ; then 
+if (( $sample_count != $fastp_finished_count )) ; then
     find 01_fastp -maxdepth 2 -name "*$r1_suffix" -exec basename {} \; | sed "s/$r1_suffix//" | grep -w -v -f - <(echo $sample_list | tr ' ' '\n') | sort -u > fastp.rush.failed.list
-    echo "  ❌ fastp failed"; 
+    echo "  ❌ fastp failed";
     exit 1
 fi
 
@@ -190,9 +196,9 @@ fi
 # Check failed
 cutadapt_finished_count=$(wc -l < cutadapt.rush.finished)
 
-if (( $sample_count != $cutadapt_finished_count )) ; then 
+if (( $sample_count != $cutadapt_finished_count )) ; then
     find 02_cutadapt -maxdepth 2 -name "*$r1_suffix" -exec basename {} \; | sed "s/$r1_suffix//" | grep -w -v -f - <(echo $sample_list | tr ' ' '\n') | sort -u > cutadapt.rush.failed.list
-    echo "  ❌ cutadapt failed"; 
+    echo "  ❌ cutadapt failed";
     exit 1
 fi
 
