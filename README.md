@@ -201,51 +201,41 @@ awk -F '\t' 'NR>1{print $2}' 02_batch.SRA_Accessions.tab.live.run.public.add_exp
 rmdir sra || true
 ```
 
-### Arrange FASTQ by BioProject
+### Step 4: Arrange FASTQ by BioProject
+*Arrange fq files by lib_layout=PAIRD|SINGLE, platfprm=illumina|454|ion torrent, bioproject/00_fq*
 
 ```bash
-# Create BioProject directories
-awk -F '\t' 'NR>1{print $19}' selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s \
-  | sort -u | xargs -I {} mkdir -p {}/00_fq
-
-# Move FASTQ files into corresponding BioProject
-awk -F '\t' 'NR>1{print $2"\t"$19}' selectd.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s \
-  | rush -j 4 --eta --verbose 'mv fq/{1}(_[12])?.fastq(.gz)? {2}/00_fq/'
+fq_sorter.py --metadata 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s --fq-dir fq --threads 4
 ```
-
-Remove SRA files and their parent directories (**use with caution**):
-
+***Pitfalls***
 ```bash
-awk -F '\t' '{print $1}' sra2bioproject.list | rush -j 48 'rm -rf 02_batch/sra/{1}'
+# if some fq files are not moved in fq. Check them 
+ls fq | sed -E 's/(_[12])\.fastq(.gz)?//' | grep -w -f - 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s
+
+# 1 sometimes, sra will be split into 3 files
+# if the left fq files is the third fq for PE reads, remove it, like
+target_project/accession1_1.fastq.gz 
+target_project/accession1_1.fastq.gz 
+fq/accession1.fastq.gz  # remove it
+
+# 2 sometimes, some fq files are not moved properly, please check the metadata and move thme manually
 ```
+### Step 5: run dd2_pipeline.sh 
+dd2_pipeline.sh: seqkit -> fastp -> cutadapt -> dada2 pe| se -> check mereged reation -> if need, dada2 se -> rm 01_fastp 02_cutadapt 03_dada2/dada2_filtered
 
-> **Note:** Some projects contain both paired-end and single-end reads. Split these into separate BioProjects (e.g., `BIOPROJECT`, `BIOPROJECT_2`). If sequencing platforms differ, split again.
-
-### Run DADA2 per BioProject
-
-**Paired-end reads**
 ```bash
-dd2_pipeline.sh --input_dir 00_fq \
-  --r1_suffix _1.fastq --r2_suffix _2.fastq \
-  --threads 48 --mode PE --platform illumina
-```
+# PE
+cd PAIRED/Illumina/
+ls | while read project;do cd project && \
+    dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq --r1_suffix _2.fastq --threads 60 --mode PE --platform illumina;done
 
-**Single-end reads**
-```bash
-# Illumina
-dd2_pipeline.sh --input_dir 00_fq \
-  --r1_suffix _1.fastq \
-  --threads 48 --mode SE --platform illumina
+# SE
+ls | while read project;do cd project && \
+    dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq --threads 60 --mode SE --platform illumina;done
 
-# Roche 454
-dd2_pipeline.sh --input_dir 00_fq \
-  --r1_suffix _1.fastq \
-  --threads 48 --mode SE --platform 454
-
-# Ion Torrent
-dd2_pipeline.sh --input_dir 00_fq \
-  --r1_suffix _1.fastq \
-  --threads 48 --mode SE --platform iontorrent
+# final check
+find . -name 'track.summary.tsv' -type f 
+find . -name '00_fq' -type d | xargs -I {} rm -rf {}
 ```
 
 ---

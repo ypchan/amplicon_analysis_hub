@@ -99,7 +99,7 @@ def main():
     ap.add_argument("-r", "--report", default="fq_sorting_report.tsv", help="Output report TSV")
     ap.add_argument("-o", "--out-root", default=".", help="Output root (creates PAIRED/ and SINGLE/)")
     ap.add_argument("--dry-run", action="store_true", help="Show actions without moving files")
-    ap.add_argument("-w", "--workers", type=int, default=min(16, (os.cpu_count() or 8)), help="Parallel workers")
+    ap.add_argument("-t", "--threads", type=int, default=min(16, (os.cpu_count() or 8)), help="Parallel threads")
     # 1-based column indices
     ap.add_argument("--col-run", type=int, default=2, help="1-based column index for Run/Accession")
     ap.add_argument("--col-bioproject", type=int, default=19, help="1-based column index for BioProject")
@@ -158,7 +158,7 @@ def main():
     # Phase 2: Parallel moves
     counts = Counter()
     moved_total = 0
-    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+    with ThreadPoolExecutor(max_workers=max(1, args.threads)) as ex:
         futs = [ex.submit(move_one, src, dst, args.dry_run) for (src, dst, _, _, _) in tasks]
         for (src, dst, ll, bp, plat), fut in tqdm(zip(tasks, as_completed(futs)),
                                                   total=len(tasks), desc="Moving", unit="file"):

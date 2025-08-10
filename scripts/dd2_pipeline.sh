@@ -6,9 +6,6 @@
 # Description: From raw FASTQ to ASV table using fastp, cutadapt and DADA2
 # ───────────────────────────────────────────────
 
-set -Eeuo pipefail
-IFS=$'\n\t'
-
 # ─────────────── Default Parameters ─────────────
 threads=4
 mode="PE"
@@ -23,14 +20,14 @@ slurm=false
 # ──────────────── Usage Function ────────────────
 usage() {
   cat <<EOF
-dada2_pipeline.sh: Process amplicon sequencing data with DADA2.
+dd2_pipeline.sh: Process amplicon sequencing data with DADA2.
 
 Steps:
     1. fastp filtering & QC
     2. Primer detection and trimming (cutadapt)
     3. DADA2 denoising & ASV generation
 
-Usage: dada2_pipeline.sh [options]
+Usage: dd2_pipeline.sh [options]
 
 Required:
   -i, --input_dir DIR         Input directory with raw FASTQ files
@@ -113,8 +110,8 @@ start_t=$(date +%s)
 fqfiles=$(find "$input_dir" -type f \( -name "*$r1_suffix" -o -name "*$r2_suffix" \))
 
 [[ -z "$fqfiles" ]] && { echo "No matching files found."; exit 1; }
-seqkit stats -j "$threads" $fqfiles | sed -E "s|$input_dir/||; s|($r1_suffix|$r2_suffix)||" > seqkit.stat.tsv
-log "$(elapsed $start_t)"
+seqkit stats -j "$threads" $fqfiles | sed -E "s/$input_dir\///;s/($r1_suffix|$r2_suffix)//" > seqkit.stat.tsv
+log "seqkit finished. $(elapsed $start_t)"
 
 log "🧼Step 2: QC using fastp"
 start_t=$(date +%s)
@@ -124,15 +121,11 @@ sample_list=$(find "$input_dir" -maxdepth 2 -name "*$r1_suffix" -exec basename {
 if [[ "$mode" == "pe" ]]; then
   echo "$sample_list" | rush -j "$threads" -v r1="$r1_suffix",r2="$r2_suffix",input_dir="$input_dir" \
       --continue --eta --succ-cmd-file fastp.rush.finished \
-      'fastp -i {input_dir}/{1}{r1} -I {input_dir}/{1}{r2} -o 01_fastp/{1}{r1} -O 01_fastp/{1}{r2} \
-          --thread 1 --length_required 100 --n_base_limit 0 --cut_tail --qualified_quality_phred 20 \
-          --unqualified_percent_limit 20 --html /dev/null --json /dev/null &> 01_fastp/{1}.fastp.log'
+      'fastp -i {input_dir}/{1}{r1} -I {input_dir}/{1}{r2} -o 01_fastp/{1}{r1} -O 01_fastp/{1}{r2} --thread 1 --length_required 100 --n_base_limit 0 --cut_tail --qualified_quality_phred 20 --unqualified_percent_limit 20 --html /dev/null --json /dev/null &> 01_fastp/{1}.fastp.log'
 else
   echo "$sample_list" | rush -j "$threads" -v r1="$r1_suffix",input_dir="$input_dir" \
       --continue --eta --succ-cmd-file fastp.rush.finished \
-      'fastp -i {input_dir}/{1}{r1} -o 01_fastp/{1}{r1} \
-          --thread 1 --length_required 100 --n_base_limit 0 --cut_tail --qualified_quality_phred 20 \
-          --unqualified_percent_limit 20 --html /dev/null --json /dev/null &> 01_fastp/{1}.fastp.log'
+      'fastp -i {input_dir}/{1}{r1} -o 01_fastp/{1}{r1} --thread 1 --length_required 100 --n_base_limit 0 --cut_tail --qualified_quality_phred 20 --unqualified_percent_limit 20 --html /dev/null --json /dev/null &> 01_fastp/{1}.fastp.log'
 fi
 
 # Check failed
@@ -140,6 +133,7 @@ sample_count=$(printf '%s\n' $sample_list | sed '/^$/d' | wc -l)
 fastp_finished_count=$(wc -l < fastp.rush.finished)
 
 if (( $sample_count != $fastp_finished_count )) ; then
+	echo "Sample count: $sample_count, fastp finished $fastp_finished_count"
     find 01_fastp -maxdepth 2 -name "*$r1_suffix" -exec basename {} \; | sed "s/$r1_suffix//" | grep -w -v -f - <(echo $sample_list | tr ' ' '\n') | sort -u > fastp.rush.failed.list
     echo "  ❌ fastp failed";
     exit 1
@@ -247,4 +241,16 @@ else
   log "sbatch dada2.slurm.sh"
   sbatch dada2.slurm.sh
 fi
+
+log "🧬 step check, should pe -> se?"
+amplicon_reads_lost_check.sh -i 03_dada2/track.summary.tsv
+if [[ -f 03_dada2/suggestion.pe2se.note ]];then
+	echo "    PE -> SE"
+	dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode SE --reads1_suffix $r1_suffix --threads $threads --platform $platform
+fi
+
+log "🧬 cleaning"
+echo "    rm -rf 01_fastp 02_cutadapt 03_dada2/dada2_filtered"
+rm -rf 01_fastp 02_cutadapt 03_dada2/dada2_filtered
+log "dd2_pipeline finished."
 exit 0
