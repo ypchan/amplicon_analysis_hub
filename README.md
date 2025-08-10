@@ -1,6 +1,10 @@
-# ProkaAtlas ![GitHub](https://img.shields.io/badge/GitHub-Atlas-blue?logo=github)
+# 5M16S ![GitHub](https://img.shields.io/badge/GitHub-5M16S-blue?logo=github) [![Active Development](https://img.shields.io/badge/status-active--development-orange?style=flat-square&logo=github)](https://github.com/yourusername/5M16S)
 
-> **An end-to-end pipeline for 16S rRNA gene amplicon analysis** — from raw SRA to DADA2 ASV tables, with reproducible scripts, references, and troubleshooting.
+***An end-to-end pipeline for 16S rRNA gene amplicon analysis** — from raw SRA to DADA2 ASV tables, with reproducible scripts, references, and troubleshooting.*
+
+>🚧 **Project under active development — features and docs may change.**
+
+
 ![5M16S](imgs/5M16S_mainpage.png)
 ---
 
