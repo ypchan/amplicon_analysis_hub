@@ -1,42 +1,32 @@
-ITS 
-internal transcribed spacer 1
-ITS1 
- ITS1
-(ITS1)
-ITS2 
-rbcL 
-__trnH\t
-__ITS\t
-__ITS3\t
-ITS region
-fungal ITS
  ITS
-ITS1F
-ITS4
-12S 
-23S 
-23s 
-28S 
-28s_rRNA
-18S 
+-ITS
+12S
+12SV5
+12s
+18S
 18SrRNA
-Fungi 
--ITS\t
-\tCOI
-PacBio 
-OXFORD_NANOPORE
+18s
+23S
+23s
+28S
+28S_rRNA
+28SrRNA
+28s
+28s_rRNA
+COI
+Fish eDNA
+Fungi
+ITS
+ITS-seq
 ITS1
+ITS1F
 ITS2
+ITS3
+ITS4
+MiFish12S
+OXFORD_NANOPORE
+PACBIO_SMRT
+fungi
+internal transcribed spacer 1
 rbcL
-__trnH\t
-__ITS\t
-__ITS3\t
-12S 
-23S 
-23s 
-28S 
-18S 
--ITS\t
-
-
-
+trnH

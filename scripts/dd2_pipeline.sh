@@ -10,7 +10,7 @@
 threads=4
 mode="PE"
 platform="illumina"
-primer_file="/home/data/t170527/database/16s_primer.tsv"
+primer_file="/home/chenyanpeng/database/16s_primer.tsv"
 partition="cn"
 mem_gb=500
 walltime="10-00:00:00"
@@ -253,4 +253,5 @@ log "🧬 cleaning"
 echo "    rm -rf 01_fastp 02_cutadapt 03_dada2/dada2_filtered"
 rm -rf 01_fastp 02_cutadapt 03_dada2/dada2_filtered
 log "dd2_pipeline finished."
+touch dd2_finished.note
 exit 0

@@ -1,13 +1,45 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-fastq_sorter.py
-Efficient FASTQ sorter for fixed filename patterns, with parallel moves & tqdm progress.
+Bioproject-first FASTQ sorter with concurrency and project-level QC/notes.
 
-Supported filename forms ONLY (case-sensitive):
-  PAIRED:  {accession}_1.fastq , {accession}_1.fastq.gz ,
-           {accession}_2.fastq , {accession}_2.fastq.gz
-  SINGLE:  {accession}.fastq   , {accession}.fastq.gz
+Metadata (TSV):
+  - If --header is set, the first row is skipped.
+  - Fixed 1-based columns:
+      col2  = Run/Accession
+      col19 = BioProject
+      col28 = LibraryLayout  (ignored for PE/SE decision)
+      col30 = Platform
 
-Metadata: TSV without header (default 1-based columns: Run=2, BioProject=19, LibraryLayout=29, Platform=30)
+Behavior:
+  1) For each accession, move FASTQs from --fq-dir into <OUT>/<BioProject>/00_fq/
+     Expected names ONLY:
+       PAIRED: {acc}_1.fastq(.gz), {acc}_2.fastq(.gz)
+       SINGLE: {acc}.fastq(.gz)
+     If an accession from metadata has no files in --fq-dir -> write it to
+       <OUT>/<BioProject>/missing_sra.list
+  2) Per BioProject:
+       - Determine PE vs SE by actual files under 00_fq/ (metadata ignored).
+       - If an accession has BOTH pair (_1/_2) AND single (*.fastq(.gz)): mark as anomaly
+         * append accession to <BioProject>/sra_3_fq.note
+         * move the "third" single file to <BioProject>/sra_3_fq/
+       - Create one read-type marker file:
+         * pe.reads   (all non-anomalous are PE)
+         * se.reads   (all non-anomalous are SE)
+         * pe_se.reads (mixed among non-anomalous)
+  3) Platform notes:
+       - Collect platforms (from metadata col30) per BioProject
+       - Map to buckets: illumina | bgi | roche454 | iontorrent | unknown
+       - Create ONE note file named like: "<joined_by_underscore>.platform.note"
+         e.g., "illumina_bgi.platform.note"
+
+CLI:
+  -m/--metadata  TSV path
+  -f/--fq-dir    FASTQ dir (source)
+  -o/--out-root  Output root (default: .)
+  -t/--threads   Parallel workers for moving files
+  --header       Skip first row in metadata
+  --dry-run      Do not actually move/touch files; just print actions
 """
 
 import argparse
@@ -15,168 +47,250 @@ import csv
 import os
 import shutil
 import sys
-from collections import Counter
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
-from tqdm import tqdm  # pip install tqdm
-
-
-def classify_platform(p: str) -> str:
-    """Map platform string to one of the standard categories."""
-    p = (p or "").lower()
-    if "illumina" in p:
-        return "Illumina"
-    if "roche" in p or "454" in p:
-        return "Roche_454"
-    if "ion" in p or "torrent" in p:
-        return "Ion_Torrent"
-    return "Unknown"
+from tqdm import tqdm
 
 
-def expected_files(fq_dir: Path, accession: str, layout: str) -> List[Path]:
-    """
-    Return the list of expected file paths based on accession and layout.
-    Only the 6 allowed filename forms are checked.
-    """
-    if layout == "PAIRED":
-        candidates = [
-            fq_dir / f"{accession}_1.fastq",
-            fq_dir / f"{accession}_1.fastq.gz",
-            fq_dir / f"{accession}_2.fastq",
-            fq_dir / f"{accession}_2.fastq.gz",
-        ]
-    else:  # SINGLE
-        candidates = [
-            fq_dir / f"{accession}.fastq",
-            fq_dir / f"{accession}.fastq.gz",
-        ]
-    # Keep only existing regular files
-    return [p for p in candidates if p.exists() and p.is_file()]
+# ---------- Platform mapping ----------
+
+def classify_platform_bucket(s: str) -> str:
+    s = (s or "").lower()
+    if any(k in s for k in ("illumina", "hiseq", "miseq", "novaseq", "nextseq")):
+        return "illumina"
+    if any(k in s for k in ("bgi", "bgiseq", "mgiseq", "mgitech", "dnbseq")):
+        return "bgi"
+    if ("roche" in s) or ("454" in s):
+        return "roche454"
+    if ("ion" in s) or ("torrent" in s):
+        return "iontorrent"
+    return "unknown"
 
 
-def read_metadata_rows(path: Path, cols: Tuple[int, int, int, int]):
-    """
-    Yield tuples (run, bioproject, layout, platform) from a no-header TSV.
-    Column indices are 1-based.
-    """
-    run_i, bp_i, ll_i, pf_i = cols
-    with path.open("r", newline="") as fh:
-        reader = csv.reader(fh, delimiter="\t")
-        for row in reader:
-            if len(row) < max(cols):
-                continue
-            run = row[run_i - 1].strip()
-            if not run:
-                continue
-            bp = (row[bp_i - 1].strip() or "NA")
-            ll = row[ll_i - 1].strip().upper()
-            pf = row[pf_i - 1].strip()
-            yield run, bp, ll, pf
+# ---------- Files expected per accession ----------
+
+def expected_paths(fq_dir: Path, acc: str) -> List[Path]:
+    """Return the 6 fixed-form candidates (if exist)."""
+    cands = [
+        fq_dir / f"{acc}_1.fastq",
+        fq_dir / f"{acc}_1.fastq.gz",
+        fq_dir / f"{acc}_2.fastq",
+        fq_dir / f"{acc}_2.fastq.gz",
+        fq_dir / f"{acc}.fastq",
+        fq_dir / f"{acc}.fastq.gz",
+    ]
+    return [p for p in cands if p.exists() and p.is_file()]
 
 
-def move_one(src: Path, dest_dir: Path, dry_run: bool) -> bool:
-    """
-    Move a file into the destination directory.
-    Returns True if moved (or dry-run), False if skipped (e.g., file exists).
-    """
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dst = dest_dir / src.name
+def move_file(src: Path, dst_dir: Path, dry_run: bool) -> bool:
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / src.name
     if dry_run:
-        print(f"DRY-RUN: mv -n '{src}' '{dest_dir}/'")
+        print(f"DRY-RUN: mv -n '{src}' '{dst_dir}/'")
         return True
-    if dst.exists():  # do not overwrite
+    if dst.exists():
         return False
     shutil.move(str(src), str(dst))
     return True
 
 
+# ---------- Read metadata ----------
+
+def iter_rows(meta: Path, skip_header: bool) -> Iterable[Tuple[str, str, str]]:
+    """
+    Yield (run, bioproject, platform_raw). Skip rows missing run or bioproject.
+    col2=run (idx1), col19=bioproject (idx18), col30=platform (idx29)
+    """
+    with meta.open("r", newline="") as fh:
+        reader = csv.reader(fh, delimiter="\t")
+        if skip_header:
+            next(reader, None)
+        for row in reader:
+            if len(row) < 30:
+                continue
+            run = row[1].strip() if len(row) > 1 else ""
+            bp  = row[18].strip() if len(row) > 18 else ""
+            pf  = row[29].strip() if len(row) > 29 else ""  # may be empty -> unknown
+            if not run or not bp:
+                continue
+            yield run, bp, pf
+
+
+# ---------- Per-project PE/SE/anomaly analysis ----------
+
+def analyze_project(proj_dir: Path, dry_run: bool) -> Tuple[int, int, int]:
+    """
+    Inspect <proj_dir>/00_fq, decide PE/SE per accession, handle anomalies.
+    Returns (n_pe, n_se, n_anom) counting non-anomalous PE/SE and anomaly count.
+    Side effects:
+      - moves single file of 3-file anomaly to <proj_dir>/sra_3_fq/
+      - writes <proj_dir>/sra_3_fq.note (append)
+      - writes one of {pe.reads,se.reads,pe_se.reads}
+    """
+    fqdir = proj_dir / "00_fq"
+    if not fqdir.exists():
+        return (0, 0, 0)
+
+    # collect files by accession
+    seen: Dict[str, Dict[str, Path]] = defaultdict(dict)  # acc -> {"r1":Path, "r2":Path, "se":Path}
+    for p in fqdir.glob("*.fastq*"):
+        name = p.name
+        if name.endswith(".fastq.gz"):
+            stem = name[:-9]  # strip .fastq.gz
+        elif name.endswith(".fastq"):
+            stem = name[:-6]
+        else:
+            continue
+        if stem.endswith("_1"):
+            acc = stem[:-2]
+            seen[acc]["r1"] = p
+        elif stem.endswith("_2"):
+            acc = stem[:-2]
+            seen[acc]["r2"] = p
+        else:
+            acc = stem
+            seen[acc]["se"] = p
+
+    n_pe = n_se = n_anom = 0
+    anom_dir = proj_dir / "sra_3_fq"
+    anom_note = proj_dir / "sra_3_fq.note"
+    # clean previous notes/markers to avoid stale state
+    for marker in ("pe.reads", "se.reads", "pe_se.reads"):
+        m = proj_dir / marker
+        if m.exists() and not dry_run:
+            m.unlink()
+
+    for acc, parts in seen.items():
+        has_pair = ("r1" in parts) and ("r2" in parts)
+        has_se   = ("se" in parts)
+        if has_pair and not has_se:
+            n_pe += 1
+        elif has_se and not has_pair:
+            n_se += 1
+        elif has_pair and has_se:
+            # anomaly: move the single file to sra_3_fq/, note accession
+            n_anom += 1
+            if not dry_run:
+                anom_dir.mkdir(exist_ok=True, parents=True)
+                with anom_note.open("a") as f:
+                    f.write(acc + "\n")
+                # move single (the "third") file
+                try:
+                    se_path = parts["se"]
+                    dst = anom_dir / se_path.name
+                    if not dst.exists():
+                        shutil.move(str(se_path), str(dst))
+                except Exception as e:
+                    print(f"Warning: failed moving third file for {acc}: {e}", file=sys.stderr)
+            else:
+                print(f"DRY-RUN: anomaly {acc} -> would write {anom_note.name} and move single to sra_3_fq/")
+
+    # write project-level read-type marker
+    marker_name = "pe_se.reads"
+    if n_anom == 0:
+        if n_pe > 0 and n_se == 0:
+            marker_name = "pe.reads"
+        elif n_se > 0 and n_pe == 0:
+            marker_name = "se.reads"
+        elif n_pe == 0 and n_se == 0:
+            # no files; keep default mixed to avoid misleading
+            marker_name = "pe_se.reads"
+    if not dry_run:
+        (proj_dir / marker_name).touch()
+
+    return (n_pe, n_se, n_anom)
+
+
+# ---------- Main ----------
+
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("-m", "--metadata", required=True, help="Metadata TSV (no header)")
-    ap.add_argument("-f", "--fq-dir", default="fq", help="FASTQ directory (no recursion)")
-    ap.add_argument("-r", "--report", default="fq_sorting_report.tsv", help="Output report TSV")
-    ap.add_argument("-o", "--out-root", default=".", help="Output root (creates PAIRED/ and SINGLE/)")
-    ap.add_argument("--dry-run", action="store_true", help="Show actions without moving files")
-    ap.add_argument("-t", "--threads", type=int, default=min(16, (os.cpu_count() or 8)), help="Parallel threads")
-    # 1-based column indices
-    ap.add_argument("--col-run", type=int, default=2, help="1-based column index for Run/Accession")
-    ap.add_argument("--col-bioproject", type=int, default=19, help="1-based column index for BioProject")
-    ap.add_argument("--col-layout", type=int, default=29, help="1-based column index for LibraryLayout")
-    ap.add_argument("--col-platform", type=int, default=30, help="1-based column index for Platform")
+    ap = argparse.ArgumentParser(
+        description="Bioproject-first FASTQ sorter with concurrency, PE/SE audit, anomaly handling, and platform notes."
+    )
+    ap.add_argument("-m", "--metadata", required=True, help="Metadata TSV path")
+    ap.add_argument("-f", "--fq-dir", default="fq", help="Source FASTQ directory")
+    ap.add_argument("-o", "--out-root", default=".", help="Output root (BioProject folders here)")
+    ap.add_argument("-t", "--threads", type=int, default=min(16, os.cpu_count() or 8), help="Parallel workers")
+    ap.add_argument("--header", action="store_true", help="Skip the first row in metadata")
+    ap.add_argument("--dry-run", action="store_true", help="Print actions without changing files")
     args = ap.parse_args()
 
     meta = Path(args.metadata)
-    fq_dir = Path(args.fq_dir)
-    out_root = Path(args.out_root)
+    src = Path(args.fq_dir)
+    out = Path(args.out_root)
+
     if not meta.exists():
         sys.exit(f"Error: metadata not found: {meta}")
-    if not fq_dir.exists():
-        sys.exit(f"Error: FASTQ dir not found: {fq_dir}")
+    if not src.exists():
+        sys.exit(f"Error: FASTQ dir not found: {src}")
 
-    # Create top-level output directories
-    (out_root / "PAIRED").mkdir(parents=True, exist_ok=True)
-    (out_root / "SINGLE").mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
 
-    # Phase 1: Build move task list by checking for expected files
-    tasks: List[Tuple[Path, Path, str, str, str]] = []  # (src, dest_dir, layout, bioproject, platformCategory)
-    missing_accessions = []
-    rows = list(read_metadata_rows(meta, (args.col_run, args.col_bioproject, args.col_layout, args.col_platform)))
+    # Build accession -> (bioproject, platform_raw) map and per-project platform buckets
+    acc2bp: Dict[str, str] = {}
+    bp2plats: Dict[str, set] = defaultdict(set)
 
-    # Deduplicate by run; keep the last occurrence
-    last_seen = {}
-    for run, bp, ll, pf in rows:
-        last_seen[run] = (run, bp, ll, pf)
+    rows = list(iter_rows(meta, skip_header=args.header))
+    for run, bp, pf in rows:
+        acc2bp[run] = bp
+        bp2plats[bp].add(classify_platform_bucket(pf))
 
-    unique_rows = list(last_seen.values())
-    with tqdm(total=len(unique_rows), desc="Indexing", unit="rec") as pbar:
-        for run, bp, ll, pf in unique_rows:
-            if ll not in {"SINGLE", "PAIRED"}:
-                pbar.update(1)
-                continue
-            plat_dir = classify_platform(pf)
-            dest_dir = out_root / ll / plat_dir / bp / "00_fq"
-            files = expected_files(fq_dir, run, ll)
+    # Stage 1: plan moves / missing lists
+    move_tasks: List[Tuple[Path, Path]] = []   # (src_path, dst_dir)
+    missing_by_bp: Dict[str, List[str]] = defaultdict(list)
+
+    with tqdm(total=len(acc2bp), desc="Indexing", unit="acc") as pbar:
+        for acc, bp in acc2bp.items():
+            files = expected_paths(src, acc)
+            proj_fq_dir = out / bp / "00_fq"
             if not files:
-                missing_accessions.append((run, bp, ll))
+                # remember missing accession for this project
+                missing_by_bp[bp].append(acc)
             else:
-                for f in files:
-                    tasks.append((f, dest_dir, ll, bp, plat_dir))
+                for p in files:
+                    move_tasks.append((p, proj_fq_dir))
             pbar.update(1)
 
-    if not tasks:
-        # Still write an empty report and exit
-        with open(args.report, "w", newline="") as fh:
-            writer = csv.writer(fh, delimiter="\t", lineterminator="\n")
-            writer.writerow(["LibLayout", "BioProject", "Platform", "FASTQ_Count"])
-        print("Nothing to move. Check accession names and files present.")
-        if missing_accessions:
-            print(f"Accessions with no matching files: {len(missing_accessions)}")
-        sys.exit(0)
+    # Stage 2: move in parallel
+    if move_tasks:
+        with ThreadPoolExecutor(max_workers=max(1, args.threads)) as ex:
+            futs = [ex.submit(move_file, s, d, args.dry_run) for (s, d) in move_tasks]
+            for _ in tqdm(as_completed(futs), total=len(futs), desc="Moving", unit="file"):
+                pass
 
-    # Phase 2: Parallel moves
-    counts = Counter()
-    moved_total = 0
-    with ThreadPoolExecutor(max_workers=max(1, args.threads)) as ex:
-        futs = [ex.submit(move_one, src, dst, args.dry_run) for (src, dst, _, _, _) in tasks]
-        for (src, dst, ll, bp, plat), fut in tqdm(zip(tasks, as_completed(futs)),
-                                                  total=len(tasks), desc="Moving", unit="file"):
-            ok = fut.result()
-            if ok:
-                counts[(ll, bp, plat)] += 1
-                moved_total += 1
+    # Write missing_sra.list per project
+    for bp, miss in missing_by_bp.items():
+        proj_dir = out / bp
+        if miss:
+            path = proj_dir / "missing_sra.list"
+            if args.dry_run:
+                print(f"DRY-RUN: would write {path} with {len(miss)} accessions")
+            else:
+                proj_dir.mkdir(parents=True, exist_ok=True)
+                with path.open("w") as f:
+                    f.write("\n".join(sorted(set(miss))) + "\n")
 
-    # Phase 3: Write report
-    with open(args.report, "w", newline="") as fh:
-        writer = csv.writer(fh, delimiter="\t", lineterminator="\n")
-        writer.writerow(["LibLayout", "BioProject", "Platform", "FASTQ_Count"])
-        for (ll, bp, plat), cnt in sorted(counts.items()):
-            writer.writerow([ll, bp, plat, cnt])
+    # Stage 3: per-project analysis (PE/SE/anomaly + platform note)
+    for bp in tqdm(sorted(set(acc2bp.values())), desc="Per-project QC", unit="bp"):
+        proj_dir = out / bp
 
-    print(f"Completed. Moved files: {moved_total}/{len(tasks)}. Report: {args.report}")
-    if args.dry_run:
-        print("Note: dry-run mode; no files were moved.")
+        # PE/SE/anomaly
+        n_pe, n_se, n_anom = analyze_project(proj_dir, args.dry_run)
+
+        # Platform note (from metadata collected)
+        plats = bp2plats.get(bp, set()) or {"unknown"}
+        name = "_".join(sorted(plats)) + ".platform.note"
+        note = proj_dir / name
+        if args.dry_run:
+            print(f"DRY-RUN: would touch {note} (platforms: {sorted(plats)})")
+        else:
+            proj_dir.mkdir(exist_ok=True, parents=True)
+            note.touch()
+
+    print("Done.")
 
 
 if __name__ == "__main__":

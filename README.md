@@ -206,40 +206,91 @@ rmdir sra || true
 ```
 
 ### Step 4: Arrange FASTQ by BioProject
-*Arrange fq files by lib_layout=PAIRD|SINGLE, platfprm=illumina|454|ion torrent, bioproject/00_fq*
+*move fq files to their bioproject/00_fq folders as the following:*
+all *fastq.gz in 00_fq
+- pe.reads is a label file represents all reads are PE sequencing
+- se.reads SE sequencing
+- pe_se.reads mixed， if count_pe_sample ~= count_se_sample, split to pe and se first, and dd2_pipeline,sh
+- sra_3_fq.note means some sra were split into 3 fq files, _1.fastq.gz,_2.fastq.gz,fastq.gz. the last one were move into folder sra_3_fq, these files are not be used in dd2_pipeline.sh
+
 
 ```bash
-fq_sorter.py --metadata 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s --fq-dir fq --threads 4
+fq_sorter.py --metadata 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s --fq-dir fq --threads 4 --header --out-root PROCESSING
 ```
-***Pitfalls***
-```bash
-# if some fq files are not moved in fq. Check them 
-ls fq | sed -E 's/(_[12])\.fastq(.gz)?//' | grep -w -f - 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s
+```text
+$ls *
+PRJDB19881:
+00_fq  illumina.platform.note  pe.reads
 
-# 1 sometimes, sra will be split into 3 files
-# if the left fq files is the third fq for PE reads, remove it, like
-target_project/accession1_1.fastq.gz 
-target_project/accession1_1.fastq.gz 
-fq/accession1.fastq.gz  # remove it
+PRJEB10570:
+00_fq  illumina.platform.note  missing_sra.list  pe_se.reads  sra_3_fq  sra_3_fq.note
 
-# 2 sometimes, some fq files are not moved properly, please check the metadata and move thme manually
+PRJEB28065:
+00_fq  illumina.platform.note  missing_sra.list  pe_se.reads
+
+PRJEB31743:
+00_fq  illumina.platform.note  pe.reads
+
+PRJEB33873:
+00_fq  illumina.platform.note  pe.reads
+
+PRJEB36610:
+00_fq  illumina.platform.note  se.reads
+
+PRJEB36981:
+00_fq  illumina.platform.note  pe.reads
 ```
+
 ### Step 5: run dd2_pipeline.sh 
+
+```
+📄 seqkit  ➡️  ✂️ fastp  ➡️  ✂️ cutadapt  ➡️  🧬 DADA2 (PE | SE)  
+                                               ⬇️ low merged ratio  
+                                               🧬 DADA2 (SE)  
+                                               ⬇️  
+🧹 cleanup  ➡️  ✅ done
+```
 dd2_pipeline.sh: seqkit -> fastp -> cutadapt -> dada2 pe| se -> check mereged reation -> if need, dada2 se -> rm 01_fastp 02_cutadapt 03_dada2/dada2_filtered
 
 ```bash
 # PE
-cd PAIRED/Illumina/
-ls | while read project;do cd project && \
-    dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq --r1_suffix _2.fastq --threads 60 --mode PE --platform illumina;done
+cd PROCESSING
 
-# SE
-ls | while read project;do cd project && \
-    dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq --threads 60 --mode SE --platform illumina;done
+# for PE
+find . -type d -exec bash -c '[ -f "$0/illumina.platform.note" -a -f "$0/pe.reads" ] && basename "$0"' {} \; while read a;do cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq.gz --r2_suffix _2.fastq.gz --threads 32 --mode PE --platform illumina && cd ../;done
 
-# final check
-find . -name 'track.summary.tsv' -type f 
-find . -name '00_fq' -type d | xargs -I {} rm -rf {}
+# for SE
+find . -type d -exec bash -c '[ -f "$0/illumina.platform.note" -a -f "$0/se.reads" ] && basename "$0"' {} \; while read a;do cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq.gz --threads 32 --mode SE --platform illumina && cd ../;done
+
+# for PE SE mixed project
+# check and manually
+```
+
+
+
+***Pitfalls***
+
+1. SRA was split into 3 fq files: ```accession_1.fastq.gz```, ```accession_2.fastq.gz```, ```accession.fastq.gz``` 
+```text
+target_project/accession_1.fastq.gz 
+target_project/accession_1.fastq.gz 
+fq/accession.fastq.gz  # remove it
+```
+```bash
+# remove the 3rd fastq
+find fq -maxdepth 1 -type f -name '*.fastq.gz' ! -name '*_[12].fastq.gz' | sed 's/.fastq.gz//' |rush -j 50 --continue --eta -v FQ=fq -v PDIR=PAIRED 'if find {PDIR} -type f \( -name "{1}_1.fastq" -o -name "{1}_1.fastq.gz" \) -print -quit | grep -q .; then rm "{FQ}/{1}.fastq.gz" 2>/dev/null;fi'
+```
+3. Single-end reads were marked as PAIRED in metadata
+```bash
+# if some fq files are not moved in fq. Check them 
+
+
+# 1 sometimes, sra will be split into 3 files
+# if the left fq files is the third fq for PE reads, remove it, like
+
+
+# 2 sometimes, some fq files are not moved properly, please check the metadata and move thme manually
+
 ```
 
 ---
