@@ -171,10 +171,8 @@ cat 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metageno
 awk '{print $2}' rush_prefetch.finished \
   | grep -w -v -f - 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s
 
-# Cleanup broken directories
-awk -F '\t' '{print $2}' 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | sed '1d' \
-  | grep -w -v -f <(awk '{print $2}' rush_prefetch.finished) \
-  | rush -j 4 'rm -rf sra/{1}'
+# Cleanup broken downloading jobs that were locked
+find sra -maxdepth 2 -name '*.sralock' -type f -exec dirname {} \; | xargs -n1 rm -rf
 
 # Retry failed
 cat 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s \
@@ -243,8 +241,9 @@ PRJEB36981:
 
 ### Step 5: run dd2_pipeline.sh 
 
-```
+```text
 📄 seqkit  ➡️  ✂️ fastp  ➡️  ✂️ cutadapt  ➡️  🧬 DADA2 (PE | SE)  
+
                                                ⬇️ low merged ratio  
                                                🧬 DADA2 (SE)  
                                                ⬇️  
@@ -257,10 +256,12 @@ dd2_pipeline.sh: seqkit -> fastp -> cutadapt -> dada2 pe| se -> check mereged re
 cd PROCESSING
 
 # for PE
-find . -type d -exec bash -c '[ -f "$0/illumina.platform.note" -a -f "$0/pe.reads" ] && basename "$0"' {} \; while read a;do cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq.gz --r2_suffix _2.fastq.gz --threads 32 --mode PE --platform illumina && cd ../;done
+# find PE reads, not finished project
+find . -maxdepth 1 -type d -exec sh -c '[ -f "$1/illumina.platform.note" ] && [ -f "$1/pe.reads" ] && [ ! -f "$1/dd2_finished.note" ] && basename "$1"' _ {} \; | while read a;do cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq.gz --r2_suffix _2.fastq.gz --mode PE --platform illumina --threads 60 && cd ../;done
 
 # for SE
-find . -type d -exec bash -c '[ -f "$0/illumina.platform.note" -a -f "$0/se.reads" ] && basename "$0"' {} \; while read a;do cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq.gz --threads 32 --mode SE --platform illumina && cd ../;done
+# # find PE reads, not finished project
+find . -type d -exec bash -c ''[ -f "$1/illumina.platform.note" ] && [ -f "$1/se.reads" ] && [ ! -f "$1/dd2_finished.note" ] && basename "$0"' {} \; while read a;do cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq.gz --threads 32 --mode SE --platform illumina && cd ../;done
 
 # for PE SE mixed project
 # check and manually

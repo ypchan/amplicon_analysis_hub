@@ -15,6 +15,7 @@ partition="cn"
 mem_gb=500
 walltime="10-00:00:00"
 slurm=false
+classifier=false
 
 
 # ──────────────── Usage Function ────────────────
@@ -39,6 +40,7 @@ Optional:
   -m, --mode      SE|PE       Mode (default: PE)
   -p, --platform  STR         illumina|454|iontorrent (default: illumina)
   --primer_file   FILE        Primer table (default: ${primer_file})
+  --classifier                Enable taxonomy classification step (pass through to dada2.R)
   --slurm                     Submit DADA2 via SLURM
   --partition     NAME        SLURM partition (default: ${partition})
   --mem           INT         SLURM memory GB (default: ${mem_gb})
@@ -50,7 +52,7 @@ EOF
 
 # ─────────────── Parse Arguments ────────────────
 # NOTE: short options -1/-2 are supported by GNU getopt
-ARGS=$(getopt -o i:1:2:t:m:p:h -l input_dir:,r1_suffix:,r2_suffix:,threads:,mode:,platform:,primer_file:,slurm,partition:,mem:,request_time:,help -n "dada2_pipeline.sh" -- "$@") || { echo "Try --help for usage." >&2; exit 1; }
+ARGS=$(getopt -o i:1:2:t:m:p:h -l input_dir:,r1_suffix:,r2_suffix:,threads:,mode:,platform:,primer_file:,slurm,partition:,mem:,request_time:,classifier,help -n "dada2_pipeline.sh" -- "$@") || { echo "Try --help for usage." >&2; exit 1; }
 eval set -- "$ARGS"
 while true; do
   case "$1" in
@@ -63,6 +65,7 @@ while true; do
     --primer_file)  primer_file="$2"; shift 2;;
     --slurm)        slurm=true;       shift;;
     --partition)    partition="$2";   shift 2;;
+    --classifier)   classifier=true;  shift;;
     --mem)          mem_gb="$2";      shift 2;;
     --request_time) walltime="$2";    shift 2;;
     -h|--help)      usage;            exit 0;;
@@ -74,6 +77,7 @@ done
 # ─────────────── Validate Input ────────────────
 [[ -z "${input_dir:-}" ]] && echo "❌ Missing --input_dir" && usage
 [[ -z "${r1_suffix:-}" ]] && echo "❌ Missing --r1_suffix" && usage
+
 
 mode=$(echo "$mode" | tr '[:upper:]' '[:lower:]')
 platform=$(echo "$platform" | tr '[:upper:]' '[:lower:]')
@@ -110,9 +114,15 @@ start_t=$(date +%s)
 fqfiles=$(find "$input_dir" -type f \( -name "*$r1_suffix" -o -name "*$r2_suffix" \))
 
 [[ -z "$fqfiles" ]] && { echo "No matching files found."; exit 1; }
-seqkit stats -j "$threads" $fqfiles | sed -E "s/$input_dir\///;s/($r1_suffix|$r2_suffix)//" > seqkit.stat.tsv
-log "seqkit finished. $(elapsed $start_t)"
+seqkit stats -j "$threads" $fqfiles | sed "s|$input_dir\/||;s|$r1_suffix||;s|$r2_suffix||" > seqkit.stat.tsv
+if [ $? -eq 0 ]; then
+  echo "--------------------- seqkit finished. $(elapsed $start_t)"
+else
+  echo "seqkit error"
+  exit 1
+fi
 
+echo ""
 log "🧼Step 2: QC using fastp"
 start_t=$(date +%s)
 mkdir -p 01_fastp
@@ -140,7 +150,6 @@ if (( $sample_count != $fastp_finished_count )) ; then
 fi
 
 # Summarize logs
-echo "    summary fastp results -> fastp.filter.tsv"
 if [[ "$mode" == "pe" ]]; then
   awk_cmd='
     /Read1 before filtering:/ { getline; r1in=$3 }
@@ -162,11 +171,13 @@ for f in 01_fastp/*.fastp.log; do
   sample=$sample
   awk -v sample="$sample" "$awk_cmd" "$f" >> fastp.filter.tsv
 done
+echo "fastp resummary -> fastp.filter.tsv"
+echo "--------------------- fastp finished. $(elapsed $start_t)"
 
-log "$(elapsed $start_t)"
 
-# ─────────────── Step 2: cutadapt ──────────────
-log "✂️ Step 2: cutadapt primer trimming"
+# ─────────────── Step 3: cutadapt ──────────────
+echo ""
+log "✂️ Step 3: cutadapt primer trimming"
 start_t=$(date +%s)
 
 mkdir -p 02_cutadapt
@@ -196,22 +207,29 @@ if (( $sample_count != $cutadapt_finished_count )) ; then
     exit 1
 fi
 
-log "$(elapsed $start_t)"
-
-echo "    summarizing 16S rRNA gene primer use"
+#echo "    summarizing 16S rRNA gene primer use"
 if [[ $mode == "pe" ]];then
     summarize_cutadapt.py -d 02_cutadapt/ -m PE -t $threads
 else
     summarize_cutadapt.py -d 02_cutadapt/ -m SE -t $threads
 fi
+if [ $? -ne 0 ]; then
+  echo "    ❌ summarize_cutadapt.py"
+  exit 1
+fi
+echo "--------------------- cutadapt finished. $(elapsed $start_t)"
 
-# ─────────────── Step 3: DADA2 ────────────────
-log "🧬 Step 3: call dada2.R"
+
+
+# ─────────────── Step 4: DADA2 ────────────────
+echo ""
+log "🧬 Step 4: dada2.R"
 start_t=$(date +%s)
 
 mkdir -p 03_dada2
 dd_cmd="dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode $mode --reads1_suffix $r1_suffix --threads $threads --platform $platform"
 [[ "$mode" == "pe" ]] && dd_cmd+=" --reads2_suffix $r2_suffix"
+[[ "$classifier" == true ]] && dd_cmd+=" --classifier /mnt/nfs_ME4084storage03/chenyanpeng/database/gtdb_both_ssu_reps_r226.assignTaxonomy.fna"
 
 cat > dada2.slurm.sh <<EOF
 #!/bin/bash
@@ -230,7 +248,6 @@ $dd_cmd
 EOF
 
 if [[ "$slurm" != true ]]; then
-  log " run DADA2: $dd_cmd"
   rm -f dada2.slurm.sh
   if ! eval "$dd_cmd" 2>&1 | tee dd2.log; then
     log "❌ dada2.R failed"
@@ -243,15 +260,31 @@ else
 fi
 
 log "🧬 step check, should pe -> se?"
+if [[ !-f 03_dada2/track.summary.tsv ]];then
+  echo "    dada2.R error"
+  exit 1
+fi
 amplicon_reads_lost_check.sh -i 03_dada2/track.summary.tsv
+
+if [ $? -eq 0 ]; then
+  log "amplicon_reads_lost_check.sh finished"
+else
+  echo "amplicon_reads_lost_check.sh error"
+  exit 1
+fi
+
 if [[ -f 03_dada2/suggestion.pe2se.note ]];then
 	echo "    PE -> SE"
 	dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode SE --reads1_suffix $r1_suffix --threads $threads --platform $platform
 fi
 
-log "🧬 cleaning"
-echo "    rm -rf 01_fastp 02_cutadapt 03_dada2/dada2_filtered"
-rm -rf 01_fastp 02_cutadapt 03_dada2/dada2_filtered
+[[ -f seqtab.nochim.rds ]] || echo "Error: ❌ dada2 failed"; exit 1
+[[ -f track.summary.tsv ]] || echo "Error: ❌ dada2 failed"; exit 1
+echo "--------------------- dada2 finished. $(elapsed $start_t)"
+
+log "🧬 cleanup 00_fq 01_fastp 02_cutadapt"
+
+rm -rf 00_fq 01_fastp 02_cutadapt
 log "dd2_pipeline finished."
 touch dd2_finished.note
 exit 0

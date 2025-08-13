@@ -146,6 +146,6 @@ if __name__ == "__main__":
 
     batch_parse_cutadapt(args.dir, args.mode, threads=args.threads)
 
-    print("✅ Cutadapt parsing complete.")
-    print("📄 Details: cutadapt_details.csv")
-    print("📊 Summary: cutadapt_summary.csv")
+    print("    ✅ Cutadapt parsing complete.")
+    print("        📄 Details: cutadapt_details.csv")
+    print("        📊 Summary: cutadapt_summary.csv")
