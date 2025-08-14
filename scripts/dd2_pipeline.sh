@@ -278,8 +278,11 @@ if [[ -f 03_dada2/suggestion.pe2se.note ]];then
 	dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode SE --reads1_suffix $r1_suffix --threads $threads --platform $platform
 fi
 
-[[ -f seqtab.nochim.rds ]] || echo "Error: ❌ dada2 failed"; exit 1
-[[ -f track.summary.tsv ]] || echo "Error: ❌ dada2 failed"; exit 1
+if [[ ! -f 03_dada2/seqtab.nochim.rds || ! -f 03_dada2/track.summary.tsv ]]; then
+    echo "Error: ❌ dada2 failed"
+    exit 1
+fi
+
 echo "--------------------- dada2 finished. $(elapsed $start_t)"
 
 log "🧬 cleanup 00_fq 01_fastp 02_cutadapt"

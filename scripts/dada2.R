@@ -212,7 +212,7 @@ if (mode == "se") {
     }
   }
   run_time <- elapsed_time(start_time)
-  cat("                      derepFastq and dada denoising finished. Elapsed time", run_time)
+  cat("    Elapsed time", run_time， "\n")
 
   # Chimera removal
   log_step("Step4: makeSequenceTable and removeBimeraDenovo")

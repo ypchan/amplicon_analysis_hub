@@ -257,11 +257,12 @@ cd PROCESSING
 
 # for PE
 # find PE reads, not finished project
-find . -maxdepth 1 -type d -exec sh -c '[ -f "$1/illumina.platform.note" ] && [ -f "$1/pe.reads" ] && [ ! -f "$1/dd2_finished.note" ] && basename "$1"' _ {} \; | while read a;do cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq.gz --r2_suffix _2.fastq.gz --mode PE --platform illumina --threads 60 && cd ../;done
+# cd into the parent dir, must give absoulte path: /home/chenyanpeng/project/pacearchaeales/24_ncbi_amplicon/02_batch/PROCESSING/${a}
+find . -maxdepth 1 -type d -exec sh -c '[ -f "$1/illumina.platform.note" ] && [ -f "$1/pe.reads" ] && [ ! -f "$1/dd2_finished.note" ] && basename "$1"' _ {} \; | while read a;do echo ${a} && cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq.gz --r2_suffix _2.fastq.gz --mode PE --platform illumina --threads 20 && cd /home/chenyanpeng/project/pacearchaeales/24_ncbi_amplicon/02_batch/PROCESSING/${a};done
 
 # for SE
 # # find PE reads, not finished project
-find . -type d -exec bash -c ''[ -f "$1/illumina.platform.note" ] && [ -f "$1/se.reads" ] && [ ! -f "$1/dd2_finished.note" ] && basename "$0"' {} \; while read a;do cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq.gz --threads 32 --mode SE --platform illumina && cd ../;done
+find . -type d -exec bash -c ''[ -f "$1/illumina.platform.note" ] && [ -f "$1/se.reads" ] && [ ! -f "$1/dd2_finished.note" ] && basename "$0"' {} \; while read a;do cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix .fastq.gz --threads 32 --mode SE --platform illumina && cd /home/chenyanpeng/project/pacearchaeales/24_ncbi_amplicon/02_batch/PROCESSING/${a};done
 
 # for PE SE mixed project
 # check and manually
