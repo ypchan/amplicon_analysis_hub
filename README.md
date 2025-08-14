@@ -14,14 +14,16 @@
 - [Software Requirements](#software-requirements)
   - [R Packages](#r-packages)
 - [Reference Data](#reference-data)
+- [Obtain Global 16S SRA Candidates](#00-obtain-global-16s-sra-candidates)
+- [Batching Strategy](#batching-strategy)
 - [Workflow](#workflow)
-  - [00. Obtain Global 16S SRA Candidates](#00-obtain-global-16s-sra-candidates)
-  - [Batching Strategy](#batching-strategy)
+  
+
   - [Step 1: Select SRA Records by BioProject](#step-1-select-sra-records-by-bioproject)
   - [Step 2: Download with prefetch](#step-2-download-with-prefetch)
   - [Step 3: Convert SRA → FASTQ](#step-3-convert-sra--fastq)
-  - [Arrange FASTQ by BioProject](#arrange-fastq-by-bioproject)
-  - [Run DADA2 per BioProject](#run-dada2-per-bioproject)
+  - [Step 4: Arrange FASTQ by BioProject](#arrange-fastq-by-bioproject)
+  - [step 5: Run DADA2 per BioProject](#run-dada2-per-bioproject)
 - [Common Pitfalls](#common-pitfalls)
 - [Troubleshooting](#troubleshooting)
 - [Notes](#notes)
@@ -62,6 +64,35 @@ ProkaAtlas is a scalable, cross-platform pipeline for 16S rRNA gene amplicon pro
 | ![dada2](https://img.shields.io/badge/dada2-1.34.0-blue) | 1.34.0 | Amplicon sequence variant inference |
 | getopt  | — | Command-line argument parsing |
 
+---
+### Scripts
+```text
+scripts/
+├── amplicon_reads_lost_check.sh # required
+├── dada2.R # required
+├── dd2_pipeline.sh # required
+├── fq_sorter.py # required
+├── is_16S_amplicon.sh 
+├── merge_seqtab_nochim_rds.R
+├── ontology_infer.py
+├── ontology_train_cv.py
+├── split_fq12.sh
+├── summarize_cutadapt.py # required
+└── unify_fq_suffix.py
+```
+***Confirm the required scripts are installed successfully***
+
+- amplicon_reads_lost_check.sh Check the ration of lost reads after merged
+- dada2.R wraper for dada2
+- dd2_pipeline.sh main pipeline
+- fq_sorter.py  arrange downloading fq files by metadata 
+- is_16S_amplicon.sh check the data whether generaged from 16S rRNA gene sequencing
+- merge_seqtab_nochim_rds.R developing
+- ontology_infer.py developing 
+- ontology_train_cv.py developing 
+- split_fq12.sh split concatenated pe reads to -1， -2
+- summarize_cutadapt.py summarizing cutadapt results
+- unify_fq_suffix.py formatting fq file names, specially for non-ncbi data
 ---
 
 ## Reference Data
@@ -130,7 +161,7 @@ grep -i '16s' SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagen
 ```
 
 ### Step 1: Select SRA Records by BioProject
-Treat the 16S candidate table as the lake; BioProject accessions are your baits.
+*Treat the 16S candidate table as the lake; BioProject accessions are your baits.*
 
 ```bash
 # Using csvtk
@@ -140,9 +171,9 @@ csvtk grep -t -f BioProject --pattern-file 02_batch.bioproject.list \
 
 # Or use grep
 head -n 1 SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics \
-  > 02_batch.bioplicon.metagenomics  # header line
+  > 02_batch.bioplicon.metagenomics  # redirect header line 
 
-cat 02_batch.bioproject.list | grep -w -f - \
+cat 02_batch.bioproject.list | grep -F -w -f - \
   SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s \
   >> 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s
 ```
@@ -150,7 +181,7 @@ cat 02_batch.bioproject.list | grep -w -f - \
 > **Tip:** add more specific filters to exclude non‑16S records.
 
 ### Step 2: Download with prefetch
-Adjust concurrency based on your network. Too many threads can waste CPU; too few underuse bandwidth.
+*Adjust concurrency based on your network. Too many threads can waste CPU; too few underuse bandwidth.*
 
 ```bash
 # If an amplicon run is >1 GB, double‑check its identity — often not true amplicon data.
@@ -159,26 +190,23 @@ cat 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metageno
   | awk -F '\t' '{print $2}' \
   | rush -j 24 --continue --eta --succ-cmd-file rush_prefetch.finished \
       'prefetch {1} -O sra &> /dev/null'
-```
 
-**Error‑prone checks:**
-```bash
-# Did all downloads finish?
-wc -l rush_prefetch.finished                      # finished jobs
-cat 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | sed '1d' | wc -l  # total jobs
+# if downloading was interrupted, continue, removed the locked accessions
+find sra -maxdepth 2 -name "*.sra.lock" -type f -exec dirname {} \; | xargs -n1 -I {} rm -rf {}
 
-# List failed runs
-awk '{print $2}' rush_prefetch.finished \
-  | grep -w -v -f - 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s
-
-# Cleanup broken downloading jobs that were locked
-find sra -maxdepth 2 -name '*.sralock' -type f -exec dirname {} \; | xargs -n1 rm -rf
-
-# Retry failed
+# and continue again, rush will check the finished file: rush_prefetch.finished, and skip finished ones
 cat 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s \
   | awk -F '\t' '{print $2}' \
-  | rush -j 24 --continue --eta --succ-cmd-file rush_prefetch.finished 'prefetch {1} -O sra &> /dev/null'
+  | rush -j 24 --continue --eta --succ-cmd-file rush_prefetch.finished \
+      'prefetch {1} -O sra &> /dev/null'
+
+# -- or
+ls sra | grep -w -v -F -f - 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s | awk -F '\t' '{print $2}' \
+  | rush -j 24 --eta \
+      'prefetch {1} -O sra &> /dev/null'
 ```
+
+![Locked failed files](imgs/sra.lock.png)
 
 ### Step 3: Convert SRA → FASTQ
 
@@ -198,10 +226,12 @@ awk -F '\t' 'NR>1{print $2}' 02_batch.SRA_Accessions.tab.live.run.public.add_exp
 awk -F '\t' 'NR>1{print $2}' 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s \
   | rush -j 48 --continue --eta --succ-cmd-file rush_fastq_dump.finished \
     'fastq-dump --threads 1 --split-3 --outdir fq --gzip sra/{1}/{1}.sra && rm -rf sra/{1}'
-
+# a small proporation of downloaded data were sralite
+find sra -maxdepth 2 -name '*.sralite' -exec basename {} _\;| 
 # Remove empty sra dir if any
 rmdir sra || true
 ```
+![sralite]()
 
 ### Step 4: Arrange FASTQ by BioProject
 *move fq files to their bioproject/00_fq folders as the following:*
@@ -217,26 +247,19 @@ fq_sorter.py --metadata 02_batch.SRA_Accessions.tab.live.run.public.add_experime
 ```
 ```text
 $ls *
-PRJDB19881:
-00_fq  illumina.platform.note  pe.reads
+PRJDB19881_pe_illumina:
+00_fq
 
-PRJEB10570:
-00_fq  illumina.platform.note  missing_sra.list  pe_se.reads  sra_3_fq  sra_3_fq.note
+PRJEB10570_pe_illumina:
+00_fq
 
-PRJEB28065:
-00_fq  illumina.platform.note  missing_sra.list  pe_se.reads
+PRJEB10570_se_illumina:
+00_fq
 
-PRJEB31743:
-00_fq  illumina.platform.note  pe.reads
+PRJEB28065_pe_illumina:
+00_fq
 
-PRJEB33873:
-00_fq  illumina.platform.note  pe.reads
-
-PRJEB36610:
-00_fq  illumina.platform.note  se.reads
-
-PRJEB36981:
-00_fq  illumina.platform.note  pe.reads
+...
 ```
 
 ### Step 5: run dd2_pipeline.sh 

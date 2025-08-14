@@ -239,7 +239,7 @@ if (mode == "se") {
   if (any(filter_out[,"reads.out"] == 0)) {
     failed_fqs <- rownames(filter_out)[filter_out[,"reads.out"] == 0]
 
-    cat("                      Warning: The following fastq files had no reads after filtering and will be removed:", paste(failed_fqs, collapse=", "))
+    cat("    Warning: The following fastq files had no reads after filtering and will be removed:", paste(failed_fqs, collapse=", "))
     # Remove failed samples from the lists
     suf_pat <- paste0("(", reads1_suffix, "|", opt$reads2_suffix, ")$")
     failed_samples <- unique(sub(suf_pat, "", failed_fqs))
