@@ -244,23 +244,32 @@ all *fastq.gz in 00_fq
 
 ```bash
 fq_sorter.py --metadata 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s --fq-dir fq --threads 4 --header --out-root PROCESSING
+
+ls PROCESSING
 ```
 ```text
-$ls *
-PRJDB19881_pe_illumina:
-00_fq
-
-PRJEB10570_pe_illumina:
-00_fq
-
-PRJEB10570_se_illumina:
-00_fq
-
-PRJEB28065_pe_illumina:
-00_fq
-
-...
+# folder arrangement
+ PRJEB51055_pe_illumina   PRJNA1019921_pe_illumina  PRJNA1263551_se_illumina  PRJNA445346_se_illumina
+ PRJEB51055_se_illumina   PRJNA1019921_se_illumina  PRJNA181037_pe_illumina   PRJNA287579_pe_illumina
+ PRJNA272135_pe_roche454  PRJNA1019951_pe_illumina  PRJNA181037_se_illumina   PRJNA450937_pe_illumina
+ PRJEB5989_pe_roche454    PRJNA1019951_se_illumina  PRJNA181037_se_roche454   PRJNA450937_se_illumina
 ```
+>Note
+
+***projectAcc_pe_illumina*** 
+
+```se``` refers to the ```--mode PE --r1_suffix .fastq```
+
+```pe``` refers to the ```--mode PE --r1_suffix _1.fastq --r2_suffix _2.fastq```
+
+ ```illumina``` refers to ```--platform illumina```
+
+ ```roche454```refers to ```--platform 454```
+
+> Pitfalls
+
+***projectAcc_pe_roche454*** Not ```pe``` conflicts with ```roche 454```, these data must be 
+
 
 ### Step 5: run dd2_pipeline.sh 
 
@@ -272,20 +281,14 @@ PRJEB28065_pe_illumina:
                                                ⬇️  
 🧹 cleanup  ➡️  ✅ done
 ```
-dd2_pipeline.sh: seqkit -> fastp -> cutadapt -> dada2 pe| se -> check mereged reation -> if need, dada2 se -> rm 01_fastp 02_cutadapt 03_dada2/dada2_filtered
-
 ```bash
 # PE
 cd PROCESSING
-
-# for PE
-# find PE reads, not finished project
-# cd into the parent dir, must give absoulte path: /home/chenyanpeng/project/pacearchaeales/24_ncbi_amplicon/02_batch/PROCESSING/${a}
-find . -maxdepth 1 -type d -exec sh -c '[ -f "$1/illumina.platform.note" ] && [ -f "$1/pe.reads" ] && [ ! -f "$1/dd2_finished.note" ] && basename "$1"' _ {} \; | while read a;do echo ${a} && cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq.gz --r2_suffix _2.fastq.gz --mode PE --platform illumina --threads 20 && cd /home/chenyanpeng/project/pacearchaeales/24_ncbi_amplicon/02_batch/PROCESSING/${a};done
+ls -d */ | grep 'pe_illumina' | while read a;do echo ${a} && cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix .fastq.gz --threads 40 --mode SE --platform illumina && cd -;done
 
 # for SE
 # # find PE reads, not finished project
-find . -type d -exec bash -c ''[ -f "$1/illumina.platform.note" ] && [ -f "$1/se.reads" ] && [ ! -f "$1/dd2_finished.note" ] && basename "$0"' {} \; while read a;do cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix .fastq.gz --threads 32 --mode SE --platform illumina && cd /home/chenyanpeng/project/pacearchaeales/24_ncbi_amplicon/02_batch/PROCESSING/${a};done
+ls -d */ | grep 'se_illumina' | while read a;do echo ${a} && cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix .fastq.gz --threads 40 --mode SE --platform illumina && cd -;done
 
 # for PE SE mixed project
 # check and manually

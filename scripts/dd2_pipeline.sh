@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-
-# ───────────────────────────────────────────────
+#───────────────────────────────────────────────
 # 🧪 DADA2 Amplicon Pipeline (Full Auto Version)
 # Author: yanpengch@qq.com
+# Date: 2025-08-15 (last update)
 # Description: From raw FASTQ to ASV table using fastp, cutadapt and DADA2
-# ───────────────────────────────────────────────
+#───────────────────────────────────────────────
 
-# ─────────────── Default Parameters ─────────────
+#─────────────── Default Parameters ─────────────
 threads=4
 mode="PE"
 platform="illumina"
@@ -17,7 +17,7 @@ walltime="10-00:00:00"
 slurm=false
 classifier=false
 
-# ──────────────── Usage Function ────────────────
+#─────────────── Usage Function ────────────────
 usage() {
   cat <<EOF
 dd2_pipeline.sh: Process amplicon sequencing data with DADA2.
@@ -31,7 +31,7 @@ Usage: dd2_pipeline.sh [options]
 
 Required:
   -i, --input_dir DIR         Input directory with raw FASTQ files
-  -1, --r1_suffix STR         R1 FASTQ suffix (e.g. _R1.fastq.gz)
+  -1, --r1_suffix STR         R1 FASTQ suffix (e.g. _1.fastq.gz)
 
 Optional:
   -2, --r2_suffix STR         R2 suffix (required if mode=PE)
@@ -49,78 +49,93 @@ EOF
   exit 1
 }
 
-# ─────────────── Parse Arguments ────────────────
-ARGS=$(getopt -o i:1:2:t:m:p:h -l input_dir:,r1_suffix:,r2_suffix:,threads:,mode:,platform:,primer_file:,slurm,partition:,mem:,request_time:,classifier,help -n "dada2_pipeline.sh" -- "$@") || { echo "Try --help for usage." >&2; exit 1; }
+#─────────────── Logging Functions ─────────────
+log()  { echo -e "$(date '+[%F %T]') \033[1;32m$*\033[0m"; }
+warn() { echo -e "$(date '+[%F %T]') \033[1;33m$*\033[0m"; }
+err()  { echo -e "$(date '+[%F %T]') \033[1;31m$*\033[0m" >&2; }
+
+elapsed() {
+  local s=$1; local e=$(date +%s)
+  printf "Elapsed time: %02d:%02d:%02d\n" $(( (e-s)/3600 )) $(( ((e-s)%3600)/60 )) $(( (e-s)%60 ))
+}
+
+#─────────────── Parse Arguments ────────────────
+ARGS=$(getopt -o i:1:2:t:m:p:h -l input_dir:,r1_suffix:,r2_suffix:,threads:,mode:,platform:,primer_file:,slurm,partition:,mem:,request_time:,classifier,help -n "dada2_pipeline.sh" -- "$@") || { err "Try --help for usage."; exit 1; }
 eval set -- "$ARGS"
 while true; do
   case "$1" in
-    -i|--input_dir) input_dir="$2";   shift 2;;
-    -1|--r1_suffix) r1_suffix="$2";   shift 2;;
-    -2|--r2_suffix) r2_suffix="$2";   shift 2;;
-    -t|--threads)   threads="$2";     shift 2;;
-    -m|--mode)      mode="$2";        shift 2;;
-    -p|--platform)  platform="$2";    shift 2;;
-    --primer_file)  primer_file="$2"; shift 2;;
-    --slurm)        slurm=true;       shift;;
-    --partition)    partition="$2";   shift 2;;
-    --classifier)   classifier=true;  shift;;
-    --mem)          mem_gb="$2";      shift 2;;
-    --request_time) walltime="$2";    shift 2;;
-    -h|--help)      usage;            exit 0;;
-    --)             shift;            break;;
-    *) echo "Internal error: $1" >&2; exit 1;;
+    -i|--input_dir) input_dir="$2"; shift 2;;
+    -1|--r1_suffix) r1_suffix="$2"; shift 2;;
+    -2|--r2_suffix) r2_suffix="$2"; shift 2;;
+    -t|--threads) threads="$2"; shift 2;;
+    -m|--mode) mode="$2"; shift 2;;
+    -p|--platform) platform="$2"; shift 2;;
+    --primer_file) primer_file="$2"; shift 2;;
+    --slurm) slurm=true; shift;;
+    --partition) partition="$2"; shift 2;;
+    --classifier) classifier=true; shift;;
+    --mem) mem_gb="$2"; shift 2;;
+    --request_time) walltime="$2"; shift 2;;
+    -h|--help) usage;;
+    --) shift; break;;
+    *) err "Internal error: $1"; exit 1;;
   esac
 done
 
-# ─────────────── Validate Input ────────────────
-[[ -z "${input_dir:-}" ]] && echo "❌ Missing --input_dir" && usage
-[[ -z "${r1_suffix:-}" ]] && echo "❌ Missing --r1_suffix" && usage
+#─────────────── Validate Input ────────────────
+[[ -z "${input_dir:-}" ]] && err "ERROR: Missing --input_dir" && usage
+[[ -z "${r1_suffix:-}" ]] && err "ERROR: Missing --r1_suffix" && usage
 input_dir="${input_dir%/}"
 
 mode=$(echo "$mode" | tr '[:upper:]' '[:lower:]')
 platform=$(echo "$platform" | tr '[:upper:]' '[:lower:]')
 
 if [[ "$mode" != "pe" && "$mode" != "se" ]]; then
-  echo "❌ --mode must be SE or PE (case-insensitive)"; usage
+  err "ERROR: --mode must be SE or PE (case-insensitive)"; usage
 fi
 if [[ "$mode" == "pe" && -z "${r2_suffix:-}" ]]; then
-  echo "❌  --r2_suffix is required in PE mode"; usage
+  err "ERROR: --r2_suffix is required in PE mode"; usage
 fi
+[[ -f "$primer_file" ]] || { err "not found $primer_file"; usage; }
 
-[[ -f "$primer_file" ]] || { echo "❌ not found $primer_file"; usage; }
+#─────────────── Pipeline Banner ───────────────
+cat <<'EOF'
 
-# ─────────────── Logging Functions ─────────────
-log() {
-  echo "$(date '+[%F %T]') $*"
-}
-elapsed() {
-  local s=$1; local e=$(date +%s)
-  printf "Elapsed time: %02d:%02d:%02d\n" $(( (e-s)/3600 )) $(( ((e-s)%3600)/60 )) $(( (e-s)%60 ))
-}
-
-echo '''
-      🧬 DADA2 Amplicon Pipeline
+            DADA2 Amplicon Pipeline
 ╭──────────────────────────────────────────────╮
 │  Raw Reads  → fastp  →  cutadapt  →  dada2   │
 ╰──────────────────────────────────────────────╯
-'''
+EOF
 
-# ─────────────── Step 0: fastp ─────────────────
-log "🧼 Step 1: stat fq statisics using seqkit stats"
-start_t=$(date +%s)
-fqfiles=$(find "$input_dir" -type f \( -name "*$r1_suffix" -o -name "*$r2_suffix" \))
-
-[[ -z "$fqfiles" ]] && { echo "No matching files found."; exit 1; }
-seqkit stats -j "$threads" $fqfiles | sed "s|$input_dir\/||;s|$r1_suffix||;s|$r2_suffix||" > seqkit.stat.tsv
-if [ $? -eq 0 ]; then
-  echo "--------------------- seqkit finished. $(elapsed $start_t)"
-else
-  echo "seqkit error"
-  exit 1
+#─────────────── Finished Check ────────────────
+if [[ -f dd2_finished.note ]]; then
+  log "Finished jobs in $(pwd). Nothing to do."
+  exit 0
 fi
 
+#─────────────── Step 1: FASTQ Statistics ──────
+log "Step 1: FASTQ statistics using seqkit"
+start_t=$(date +%s)
+fqfiles=$(find "$input_dir" -type f \( -name "*$r1_suffix" -o -name "*$r2_suffix" \))
+[[ -z "$fqfiles" ]] && { err "No matching files found."; exit 1; }
+
+if [[ -f seqkit.stat.tsv ]]; then
+  existing_count=$(($(wc -l < seqkit.stat.tsv) - 1))
+  new_count=$(echo "$fqfiles" | wc -l)
+  if [[ "$existing_count" -eq "$new_count" ]]; then
+    log "seqkit.stat.tsv exists and file count matches. Skipping seqkit stats."
+  else
+    warn "File count changed. Re-running seqkit stats..."
+    seqkit stats -j "$threads" $fqfiles | sed "s|$input_dir/||;s|$r1_suffix||;s|$r2_suffix||" > seqkit.stat.tsv
+  fi
+else
+  seqkit stats -j "$threads" $fqfiles | sed "s|$input_dir/||;s|$r1_suffix||;s|$r2_suffix||" > seqkit.stat.tsv
+fi
+elapsed $start_t
 echo ""
-log "🧼Step 2: QC using fastp"
+
+#─────────────── Step 2: fastp QC ──────────────
+log "Step 2: QC using fastp"
 start_t=$(date +%s)
 mkdir -p 01_fastp
 sample_list=$(find "$input_dir" -maxdepth 2 -name "*$r1_suffix" -exec basename {} \; | sed "s/$r1_suffix//")
@@ -135,18 +150,17 @@ else
     'fastp -i {input_dir}/{1}{r1} -o 01_fastp/{1}{r1} --thread 1 --length_required 100 --n_base_limit 0 --cut_tail --qualified_quality_phred 20 --unqualified_percent_limit 20 --html /dev/null --json /dev/null &> 01_fastp/{1}.fastp.log'
 fi
 
-# Check failed
 sample_count=$(printf '%s\n' $sample_list | sed '/^$/d' | wc -l)
 fastp_finished_count=$(wc -l < fastp.rush.finished)
 
-if (( $sample_count != $fastp_finished_count )) ; then
-  echo "Sample count: $sample_count, fastp finished $fastp_finished_count"
+if (( sample_count != fastp_finished_count )) ; then
+  warn "Sample count: $sample_count, fastp finished $fastp_finished_count"
   find 01_fastp -maxdepth 2 -name "*$r1_suffix" -exec basename {} \; | sed "s/$r1_suffix//" | grep -w -v -f - <(echo $sample_list | tr ' ' '\n') | sort -u > fastp.rush.failed.list
-  echo "  ❌ fastp failed";
+  err "ERROR: fastp failed"
   exit 1
 fi
 
-# Summarize logs
+# fastp summary
 if [[ "$mode" == "pe" ]]; then
   awk_cmd='
     /Read1 before filtering:/ { getline; r1in=$3 }
@@ -165,22 +179,20 @@ fi
 > fastp.filter.tsv
 for f in 01_fastp/*.fastp.log; do
   sample=$(basename "$f" .fastp.log)
-  sample=$sample
   awk -v sample="$sample" "$awk_cmd" "$f" >> fastp.filter.tsv
 done
-echo "fastp resummary -> fastp.filter.tsv"
-echo "--------------------- fastp finished. $(elapsed $start_t)"
-
-# ─────────────── Step 3: cutadapt ──────────────
+log "fastp summary -> fastp.filter.tsv"
+log "--------------------- fastp finished. $(elapsed $start_t)"
 echo ""
-log "✂️ Step 3: cutadapt primer trimming"
-start_t=$(date +%s)
 
+#─────────────── Step 3: cutadapt ──────────────
+log "Step 3: cutadapt primer trimming"
+start_t=$(date +%s)
 mkdir -p 02_cutadapt
 
-f_primers=$(grep '^forward' "$primer_file" | while read a b c d; do echo "-g ${b}=^${c}";done | xargs)
-r_primers=$(grep '^reverse' "$primer_file" | while read a b c d; do echo "-G ${b}=^${c}";done | xargs)
-fr_primers=$(grep -e '^forward' -e '^reverse' "$primer_file" | while read a b c d; do echo "-g ${b}=^${c}";done | xargs)
+f_primers=$(grep '^forward' "$primer_file" | while read a b c d; do echo "-g ${b}=^${c}"; done | xargs)
+r_primers=$(grep '^reverse' "$primer_file" | while read a b c d; do echo "-G ${b}=^${c}"; done | xargs)
+fr_primers=$(grep -e '^forward' -e '^reverse' "$primer_file" | while read a b c d; do echo "-g ${b}=^${c}"; done | xargs)
 
 if [[ "$mode" == "pe" ]]; then
   cutadapt_opts="$f_primers $r_primers --revcomp -j 1"
@@ -194,31 +206,28 @@ else
     'cutadapt {opt} -o 02_cutadapt/{1}{r1} 01_fastp/{1}{r1} &> 02_cutadapt/{1}.cutadapt.log'
 fi
 
-# Check failed
 cutadapt_finished_count=$(wc -l < cutadapt.rush.finished)
-
-if (( $sample_count != $cutadapt_finished_count )) ; then
+if (( sample_count != cutadapt_finished_count )) ; then
   find 02_cutadapt -maxdepth 2 -name "*$r1_suffix" -exec basename {} \; | sed "s/$r1_suffix//" | grep -w -v -f - <(echo $sample_list | tr ' ' '\n') | sort -u > cutadapt.rush.failed.list
-  echo "  ❌ cutadapt failed";
+  err "ERROR: cutadapt failed"
   exit 1
 fi
 
-if [[ $mode == "pe" ]];then
+if [[ $mode == "pe" ]]; then
   summarize_cutadapt.py -d 02_cutadapt/ -m PE -t $threads
 else
   summarize_cutadapt.py -d 02_cutadapt/ -m SE -t $threads
 fi
 if [ $? -ne 0 ]; then
-  echo "    ❌ summarize_cutadapt.py"
+  err "ERROR: summarize_cutadapt.py"
   exit 1
 fi
-echo "--------------------- cutadapt finished. $(elapsed $start_t)"
-
-# ─────────────── Step 4: DADA2 ────────────────
+log "--------------------- cutadapt finished. $(elapsed $start_t)"
 echo ""
-log "🧬 Step 4: dada2.R"
-start_t=$(date +%s)
 
+#─────────────── Step 4: DADA2 ────────────────
+log "Step 4: dada2.R"
+start_t=$(date +%s)
 mkdir -p 03_dada2
 dd_cmd="dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode $mode --reads1_suffix $r1_suffix --threads $threads --platform $platform"
 [[ "$mode" == "pe" ]] && dd_cmd+=" --reads2_suffix $r2_suffix"
@@ -243,7 +252,7 @@ EOF
 if [[ "$slurm" != true ]]; then
   rm -f dada2.slurm.sh
   if ! eval "$dd_cmd" 2>&1 | tee dd2.log; then
-    log "❌ dada2.R failed"
+    err "ERROR: dada2.R failed"
     exit 1
   fi
   log "$(elapsed $start_t)"
@@ -252,34 +261,35 @@ else
   sbatch dada2.slurm.sh
 fi
 
-log "🧬 step check, should pe -> se?"
-if [[ ! -f 03_dada2/track.summary.tsv ]];then
-  echo "    dada2.R error"
+log "Step 4: check, should PE → SE?"
+if [[ ! -f 03_dada2/track.summary.tsv ]]; then
+  err "dada2.R error"
   exit 1
 fi
 amplicon_reads_lost_check.sh -i 03_dada2/track.summary.tsv
 
-if [[ ! -f 03_dada2/reads_lost_ratio.summary.tsv ]]; then
+if [[ -f 03_dada2/reads_lost_ratio.summary.tsv ]]; then
   log "amplicon_reads_lost_check.sh finished"
 else
-  log "amplicon_reads_lost_check.sh error"
+  err "amplicon_reads_lost_check.sh error"
   exit 1
 fi
 
-if [[ -f 03_dada2/suggestion.pe2se.note ]];then
-  echo "    PE -> SE"
+if [[ -f 03_dada2/suggestion.pe2se.note ]]; then
+  warn "PE → SE suggested, rerunning dada2.R in SE mode"
   dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode SE --reads1_suffix $r1_suffix --threads $threads --platform $platform
 fi
 
 if [[ ! -f 03_dada2/seqtab.nochim.rds || ! -f 03_dada2/track.summary.tsv ]]; then
-  echo "Error: ❌ dada2 failed"
+  err "ERROR: dada2 failed"
   exit 1
 fi
 
-echo "--------------------- dada2 finished. $(elapsed $start_t)"
+log "--------------------- dada2 finished. $(elapsed $start_t)"
+echo ""
 
-log "🧬 cleanup 00_fq 01_fastp 02_cutadapt"
-
+#─────────────── Cleanup ───────────────────────
+log "Step cleanup: 00_fq 01_fastp 02_cutadapt"
 rm -rf 00_fq 01_fastp 02_cutadapt
 log "dd2_pipeline finished."
 touch dd2_finished.note

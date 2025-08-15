@@ -19,16 +19,11 @@ Behavior:
      If an accession from metadata has no files in --fq-dir -> write it to
        <OUT>/<BioProject>_<readtype>_<platform>/missing_sra.list
   2) Per BioProject_<readtype>_<platform>:
-       - Determine PE vs SE by actual files under 00_fq/
-       - If an accession has BOTH pair (_1/_2) AND single (*.fastq(.gz)): mark as anomaly
+       - Detect "3-file anomaly": an accession has BOTH pair (_1/_2) AND single (*.fastq(.gz))
          * append accession to sra_3_fq.note
          * move the "third" single file to sra_3_fq/
-       - Create one read-type marker file:
-         * pe.reads   (all non-anomalous are PE)
-         * se.reads   (all non-anomalous are SE)
-         * pe_se.reads (mixed among non-anomalous)
-  3) Platform notes:
-       - Create a note file named "<platform>.platform.note" in each subproject folder.
+  3) **No in-directory marker files are written anymore**
+     (i.e., no pe.reads / se.reads / pe_se.reads, and no <platform>.platform.note)
 
 CLI:
   -m/--metadata  TSV path
@@ -82,6 +77,13 @@ def expected_paths(fq_dir: Path, acc: str) -> List[Path]:
     return [p for p in cands if p.exists() and p.is_file()]
 
 
+def is_pe_by_files(files: List[Path]) -> bool:
+    """Infer PE if any of the files carries _1 or _2."""
+    names = [p.name for p in files]
+    return any(n.endswith("_1.fastq") or n.endswith("_1.fastq.gz") or
+               n.endswith("_2.fastq") or n.endswith("_2.fastq.gz") for n in names)
+
+
 def move_file(src: Path, dst_dir: Path, dry_run: bool) -> bool:
     dst_dir.mkdir(parents=True, exist_ok=True)
     dst = dst_dir / src.name
@@ -116,9 +118,15 @@ def iter_rows(meta: Path, skip_header: bool) -> Iterable[Tuple[str, str, str]]:
             yield run, bp, pf
 
 
-# ---------- Per-project PE/SE/anomaly analysis ----------
+# ---------- Per-project anomaly analysis (no markers) ----------
 
 def analyze_project(proj_dir: Path, dry_run: bool) -> Tuple[int, int, int]:
+    """
+    Scan 00_fq and:
+      - Count PE / SE (for logging only)
+      - Handle 3-file anomalies: move the single file to sra_3_fq/ and append note
+    No marker files are created.
+    """
     fqdir = proj_dir / "00_fq"
     if not fqdir.exists():
         return (0, 0, 0)
@@ -145,10 +153,6 @@ def analyze_project(proj_dir: Path, dry_run: bool) -> Tuple[int, int, int]:
     n_pe = n_se = n_anom = 0
     anom_dir = proj_dir / "sra_3_fq"
     anom_note = proj_dir / "sra_3_fq.note"
-    for marker in ("pe.reads", "se.reads", "pe_se.reads"):
-        m = proj_dir / marker
-        if m.exists() and not dry_run:
-            m.unlink()
 
     for acc, parts in seen.items():
         has_pair = ("r1" in parts) and ("r2" in parts)
@@ -172,15 +176,6 @@ def analyze_project(proj_dir: Path, dry_run: bool) -> Tuple[int, int, int]:
                     print(f"Warning: failed moving third file for {acc}: {e}", file=sys.stderr)
             else:
                 print(f"DRY-RUN: anomaly {acc} -> would note and move")
-
-    marker_name = "pe_se.reads"
-    if n_anom == 0:
-        if n_pe > 0 and n_se == 0:
-            marker_name = "pe.reads"
-        elif n_se > 0 and n_pe == 0:
-            marker_name = "se.reads"
-    if not dry_run:
-        (proj_dir / marker_name).touch()
 
     return (n_pe, n_se, n_anom)
 
@@ -224,11 +219,13 @@ def main():
             files = expected_paths(src, acc)
             plat = acc2plat.get(acc, "unknown")
             if not files:
-                for rt in ["pe", "se"]:  # could be missing in either type
+                # Unknown readtype at this moment; keep previous behavior:
+                # record missing under both pe and se groups for this platform.
+                for rt in ["pe", "se"]:
                     proj_key = f"{bp}_{rt}_{plat}"
                     missing_by_proj[proj_key].append(acc)
             else:
-                readtype = "pe" if any("_1.fastq" in f.name or "_1.fastq.gz" in f.name for f in files) else "se"
+                readtype = "pe" if is_pe_by_files(files) else "se"
                 proj_dir = out / f"{bp}_{readtype}_{plat}" / "00_fq"
                 for p in files:
                     move_tasks.append((p, proj_dir))
@@ -240,6 +237,7 @@ def main():
             for _ in tqdm(as_completed(futs), total=len(futs), desc="Moving", unit="file"):
                 pass
 
+    # Write missing lists
     for proj_key, miss in missing_by_proj.items():
         proj_dir = out / proj_key
         if miss:
@@ -251,6 +249,7 @@ def main():
                 with path.open("w") as f:
                     f.write("\n".join(sorted(set(miss))) + "\n")
 
+    # Analyze anomalies per existing project dir (no markers, no platform notes)
     proj_dirs = sorted({ (out / f"{bp}_{rt}_{plat}")
                          for bp in set(acc2bp.values())
                          for rt in ["pe", "se"]
@@ -259,13 +258,8 @@ def main():
 
     for proj_dir in tqdm(proj_dirs, desc="Per-project QC", unit="proj"):
         n_pe, n_se, n_anom = analyze_project(proj_dir, args.dry_run)
-        plat = proj_dir.name.split("_")[-1]
-        note = proj_dir / f"{plat}.platform.note"
-        if args.dry_run:
-            print(f"DRY-RUN: would touch {note}")
-        else:
-            proj_dir.mkdir(exist_ok=True, parents=True)
-            note.touch()
+        # Optional: you can print summary; nothing is written to disk.
+        print(f"[QC] {proj_dir.name}: PE={n_pe}, SE={n_se}, ANOM={n_anom}")
 
     print("Done.")
 
