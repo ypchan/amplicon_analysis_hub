@@ -1,37 +1,68 @@
-# 5M16S ![GitHub](https://img.shields.io/badge/GitHub-5M16S-blue?logo=github) [![Active Development](https://img.shields.io/badge/status-active--development-orange?style=flat-square&logo=github)](https://github.com/yourusername/5M16S)
+<p align="center">
+  <img src="imgs/5M16S_mainpage.png" alt="5M16S banner" width="860">
+</p>
 
-***An end-to-end pipeline for 16S rRNA gene amplicon analysis** — from raw SRA to DADA2 ASV tables, with reproducible scripts, references, and troubleshooting.*
+<h1 align="center">5M16S</h1>
 
->🚧 **Project under active development — features and docs may change.**
+<p align="center">
+  <a href="https://github.com/yourusername/5M16S">
+    <img alt="GitHub" src="https://img.shields.io/badge/GitHub-5M16S-2f80ed?logo=github&logoColor=white">
+  </a>
+  <a href="https://github.com/yourusername/5M16S">
+    <img alt="Active Development" src="https://img.shields.io/badge/status-active--development-f39c12?style=flat-square&logo=github">
+  </a>
+  <img alt="R" src="https://img.shields.io/badge/R-4.4.3-276DC3?logo=r&logoColor=white">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white">
+</p>
 
+<p align="center"><i>
+An end-to-end pipeline for 16S rRNA gene amplicon analysis — from raw SRA accessions to DADA2 ASV tables, with reproducible scripts, references, and troubleshooting.
+</i></p>
 
-![5M16S](imgs/5M16S_mainpage.png)
+> [!WARNING]
+> 🚧 Project under active development — features and docs may change.
+
 ---
 
 ## 📑 Table of Contents
-- [Overview](#overview)
+<details>
+<summary><b>Expand / Collapse</b></summary>
+
+
 - [Key Challenges](#key-challenges)
 - [Software Requirements](#software-requirements)
-  - [R Packages](#r-packages)
+- [Scripts](#scripts)
 - [Reference Data](#reference-data)
-- [Obtain Global 16S SRA Candidates](#00-obtain-global-16s-sra-candidates)
-- [Batching Strategy](#batching-strategy)
 - [Workflow](#workflow)
-  
+  - [Step 0. Global 16S rRNA gene SRA metadata](#00-obtain-global-16s-sra-candidates)
+  - [Step 1: Data cleaning](#step-1-select-sra-records-by-bioproject)
+  - [Step 2: Downloading](#step-2-download-with-prefetch)
+  - [Step 3: Converting SRA → FASTQ](#step-3-convert-sra--fastq)
+  - [Step 4: Organize FASTQs by BioProject, Layout & Platform
+](#step-4-arrange-fastq-by-bioproject)
+  - [Step 5: dada2 Analysis by BioProject Directory
+](#step-5-run-dada2-per-bioproject)
+  - [Step 6: 16S rRNA gene sequencing Region Identification
+](#step-5-run-dada2-per-bioproject)
+  - [Step 7: Merging by 16S rRNA gene regions
+](#step-5-run-dada2-per-bioproject)
+  - [Step 8: Removing non-16S rRNA gene features
+](#step-5-run-dada2-per-bioproject)
+  - [Step 9: Checking sequencing saturation & Removing Unsaturated Data
+](#step-5-run-dada2-per-bioproject)
+  - [Step 10: Ontology assignments
+](#step-5-run-dada2-per-bioproject)
+  - [Step 11: Ontology assignments
+](#step-5-run-dada2-per-bioproject)
+  - [Step 12: Mapping Geographic Coordinates
+](#step-5-run-dada2-per-bioproject)
 
-  - [Step 1: Select SRA Records by BioProject](#step-1-select-sra-records-by-bioproject)
-  - [Step 2: Download with prefetch](#step-2-download-with-prefetch)
-  - [Step 3: Convert SRA → FASTQ](#step-3-convert-sra--fastq)
-  - [Step 4: Arrange FASTQ by BioProject](#arrange-fastq-by-bioproject)
-  - [step 5: Run DADA2 per BioProject](#run-dada2-per-bioproject)
+
 - [Common Pitfalls](#common-pitfalls)
 - [Troubleshooting](#troubleshooting)
 - [Notes](#notes)
 
----
-
-## Overview
-ProkaAtlas is a scalable, cross-platform pipeline for 16S rRNA gene amplicon processing. It standardizes **retrieval → QC → primer trimming → DADA2** across **Illumina, Roche 454, and Ion Torrent** datasets, producing comparable ASV tables and summary reports.
+</details>
 
 ---
 
@@ -58,42 +89,31 @@ ProkaAtlas is a scalable, cross-platform pipeline for 16S rRNA gene amplicon pro
 | ![rush](https://img.shields.io/badge/rush-0.6.1-lightgrey) | 0.6.1 | Parallel execution |
 | ![csvtk](https://img.shields.io/badge/csvtk-0.33.0-lightgrey) | 0.33.0 | Table filtering and manipulation |
 
-### R Packages
+
 | Package | Version | Purpose |
 |---------|---------|---------|
 | ![dada2](https://img.shields.io/badge/dada2-1.34.0-blue) | 1.34.0 | Amplicon sequence variant inference |
-| getopt  | — | Command-line argument parsing |
+| ![getopt](https://img.shields.io/badge/getopt-blue)  | — | Command-line argument parsing |
 
 ---
-### Scripts
-```text
-scripts/
-├── amplicon_reads_lost_check.sh # required
-├── dada2.R # required
-├── dd2_pipeline.sh # required
-├── fq_sorter.py # required
-├── is_16S_amplicon.sh 
-├── merge_seqtab_nochim_rds.R
-├── ontology_infer.py
-├── ontology_train_cv.py
-├── split_fq12.sh
-├── summarize_cutadapt.py # required
-└── unify_fq_suffix.py
-```
-***Confirm the required scripts are installed successfully***
+## Scripts
 
-- amplicon_reads_lost_check.sh Check the ration of lost reads after merged
-- dada2.R wraper for dada2
-- dd2_pipeline.sh main pipeline
-- fq_sorter.py  arrange downloading fq files by metadata 
-- is_16S_amplicon.sh check the data whether generaged from 16S rRNA gene sequencing
-- merge_seqtab_nochim_rds.R developing
-- ontology_infer.py developing 
-- ontology_train_cv.py developing 
-- split_fq12.sh split concatenated pe reads to -1， -2
-- summarize_cutadapt.py summarizing cutadapt results
-- unify_fq_suffix.py formatting fq file names, specially for non-ncbi data
----
+| Script                      | Required | Language | Status      | Purpose |
+|----------------------------|:--------:|:--------:|------------|---------|
+| `amplicon_reads_lost_check.sh` | ✅ | Shell    | Stable     | Check the **ratio of reads lost after merging**; reports samples with low merged/non-chimera retention. |
+| `dada2.R`                  | ✅       | R        | Stable     | **Wrapper for DADA2** to infer ASVs and produce QC summaries. |
+| `dd2_pipeline.sh`          | ✅       | Shell    | Stable     | **Main pipeline driver**: orchestrates `seqkit → fastp → cutadapt → DADA2` (PE/SE). |
+| `fq_sorter.py`             | ✅       | Python   | Stable     | **Arrange downloaded FASTQ files by metadata** (e.g., BioProject, platform, PE/SE) into `PROJECT/00_fq/`. |
+| `is_16S_amplicon.sh`       | —        | Shell    | Stable     | **Verify whether data were generated from 16S rRNA amplicon sequencing** (e.g., via reference hits). |
+| `merge_seqtab_nochim_rds.R`| —        | R        | Developing | **Merge DADA2 `seqtab_nochim` RDS files** across runs/projects. |
+| `ontology_infer.py`        | —        | Python   | Developing | **Ontology inference** utilities for downstream metadata/label prediction. |
+| `ontology_train_cv.py`     | —        | Python   | Developing | **Ontology training & cross-validation** helpers. |
+| `split_fq12.sh`            | —        | Shell    | Stable     | **Split concatenated paired-end reads** into `_1` and `_2` files. |
+| `summarize_cutadapt.py`    | ✅       | Python   | Stable     | **Summarize cutadapt results** (primer detection/trim statistics). |
+| `unify_fq_suffix.py`       | —        | Python   | Stable     | **Normalize FASTQ filenames**, especially for non-NCBI data sources. |
+
+> **Note:** Ensure all scripts marked **✅ Required** are **installed and executable** before running the pipeline.
+
 
 ## Reference Data
 Build a 16S rRNA reference database for verifying FASTQ content (optional but recommended).
