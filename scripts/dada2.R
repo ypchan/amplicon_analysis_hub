@@ -191,15 +191,17 @@ if (mode == "se") {
   names(ddFs) <- sample_names
   for (i in seq_along(sample_names)) {
     sam <- sample_names[i]
-    log_step("  Processing sample: %s (%d/%d)", sam, i, sample_count)
+    start_time_sub <- Sys.time()
+    log_step("Processing sample: %s (%d/%d)", sam, i, sample_count)
     derep <- derepFastq(filtFs[[sam]])
     if (platform == "illumina") {
       ddFs[[sam]] <- dada(derep, err = errF, multithread = threads)
     } else {
       ddFs[[sam]] <- dada(derep, err = errF, multithread = threads, HOMOPOLYMER_GAP_PENALTY = -1, BAND_SIZE = 32)
     }
+    cat("    Elapsed time:", elapsed_time(start_time_sub), "\n")
   }
-  cat("    Elapsed time: ", elapsed_time(start_time), "\n")
+  cat("    derepFastq and denosing. Elapsed time: ", elapsed_time(start_time), "\n")
 
   # Chimera removal
   log_step("Step 4: makeSequenceTable & removeBimeraDenovo")
@@ -254,8 +256,9 @@ if (mode == "se") {
   names(denoisedR_counts) <- sample_names
 
   for (i in seq_along(sample_names)) {
+    start_time_sub <- Sys.time()
     sam <- sample_names[i]
-    log_step("  Processing sample: %s (%d/%d)", sam, i, sample_count)
+    log_step("Processing sample: %s (%d/%d)", sam, i, sample_count)
     derepF <- derepFastq(filtFs[[sam]])
     ddF    <- dada(derepF, err = errF, multithread = threads)
     derepR <- derepFastq(filtRs[[sam]])
@@ -263,9 +266,10 @@ if (mode == "se") {
     mergers[[sam]] <- mergePairs(ddF, derepF, ddR, derepR)
     denoisedF_counts[sam] <- sum(getUniques(ddF))
     denoisedR_counts[sam] <- sum(getUniques(ddR))
+    cat("    Elapsed time:", elapsed_time(start_time_sub), "\n")
   }
   rm(derepF, derepR)
-  cat("    Elapsed time: ", elapsed_time(start_time), "\n")
+  cat("    derepFastq, denosing and megering. Elapsed time: ", elapsed_time(start_time), "\n")
 
   log_step("Step 4: makeSequenceTable & removeBimeraDenovo")
   start_time <- Sys.time()
