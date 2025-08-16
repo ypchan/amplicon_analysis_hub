@@ -225,8 +225,17 @@ ls sra | grep -w -v -F -f - 02_batch.SRA_Accessions.tab.live.run.public.add_expe
   | rush -j 24 --eta \
       'prefetch {1} -O sra &> /dev/null'
 ```
+**Locked sra** stop downloading
+<p align="center">
+  <img src="imgs/sra.lock.png" alt="fq_sorter" width="860">
+</p>
 
-![Locked failed files](imgs/sra.lock.png)
+**downloading using prefetch**
+
+<p align="center">
+  <img src="imgs/prefetch.png" alt="fq_sorter" width="860">
+</p>
+
 
 ### Step 3: Convert SRA → FASTQ
 
@@ -264,11 +273,26 @@ This new format contains base calls, simplified quality scores, and alignments. 
 
 >SRA Lite files are produced from SRA Normalized Format by assessing overall read quality and setting a per-read quality flag (Read_Filter). In the resulting files, all reads have a Read_Filter flag with value pass or reject. Importantly, it is still possible to produce fastq formatted files from SRA Lite format using the SRA toolkit. In this case, each read will have a constant quality score set to 30 for reads with Read_Filter value "pass" or 3 for reads with a value "reject".
 
+**merged miseq fq**
+<p align="center">
+  <img src="imgs/sralite_q30.png" alt="fq_sorter" width="860">
+</p>
+
+**sralite fq fastp result**
+
+<p align="center">
+  <img src="imgs/sralite_fastp.png" alt="fq_sorter" width="860">
+</p>
+
 >Illumina fastq and sam/bam specifications support a quality bit that is set by the sequencing instrument and SRA Lite stores this as a "pass"/"reject" Read_Filter value. If this bit is set in the submitted fastq or bam file, the value is retained. If it is not, SRA will set a pass/reject value based on the quality score distribution within each read. Reads that have more than half of quality score values <20 are flagged "reject". Reads that begin or end with a run of more than 10 quality scores <20 are also flagged "reject". Reads that pass these quality checks are flagged "pass". When dumping data using the fastq-dump, fasterq-dump, or sam-dump utilities in the SRA toolkit, all reads are included by default. However, the fastq-dump tool has an option to include only passed or only rejected reads:
 
 ```fastq-dump --read-filter <[pass|reject]>```
 
 ***dada2 dose not work with this kind of data without the real qualities.*** Specially in the step learnError, it causes error.
+<p align="center">
+  <img src="imgs/sralite_caused_error.png" alt="fq_sorter" width="860">
+</p>
+
 
 
 ### Step 4: Arrange FASTQ by BioProject
@@ -318,7 +342,35 @@ ls -d */ | grep 'se_illumina' | while read a;do echo ${a} && cd ${a} && dd2_pipe
 # for PE SE mixed project
 # check and manually
 ```
+**Finished bioproject**
+<p align="center">
+  <img src="imgs/finished_bioproject_follder.png" alt="fq_sorter" width="860">
+</p>
 
+```reads_lost_ratio.summary.tsv``` summary of primer use
+
+<p align="center">
+  <img src="imgs/reads_lost_ratio_summary.png" alt="fq_sorter" width="860">
+</p>
+
+```reads_lost_ratio.tsv``` how many reads left after dada2 analysis
+<p align="center">
+  <img src="imgs/reads_lost_ratio_summary.png" alt="fq_sorter" width="860">
+</p>
+
+```seqkit_stat.tsv``` fq statistics
+<p align="center">
+  <img src="imgs/seqkit_stat.png" alt="fq_sorter" width="860">
+</p>
+
+```seqtab.nochim.rds``` the main results, asv count matrix
+
+```suggestion.is_pe.note``` Label file, pe data, of 75% samples have more than half reads left.
+
+```track.summary.tsv``` reads number changes.
+<p align="center">
+  <img src="imgs/track_summary.png" alt="fq_sorter" width="860">
+</p>
 
 
 ***Pitfalls***

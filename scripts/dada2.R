@@ -55,7 +55,7 @@ Output (in <output_dir>):
   dada2_filtered/       Filtered FASTQ files
   seqtab.nochim.rds     Non-chimera ASV table (RDS)
   track.summary.tsv     Read counts at each step
-  taxonomy.rds/.tsv     Taxonomy assignment (if -c given)
+  taxonomy.rds.tsv     Taxonomy assignment (if -c given)
 \n")
 }
 
@@ -181,8 +181,9 @@ if (mode == "se") {
   }
 
   log_step("Step 2: learnErrors")
-  errF <- learnErrors(filtFs, multithread = threads, randomize = TRUE, nbases = 1e8)
-  cat("    Elapsed time: ", elapsed_time(start_time), "\n")
+  t2 <- Sys.time()
+  learnErrors(filtFs, multithread = threads, randomize = TRUE, nbases = 1e8)
+  cat("    Elapsed time: ", elapsed_time(t2), "\n")
 
   # DADA denoising
   log_step("Step 3: derepFastq & dada denoising")
@@ -201,6 +202,7 @@ if (mode == "se") {
     }
     cat("    Elapsed time:", elapsed_time(start_time_sub), "\n")
   }
+
   cat("    derepFastq and denosing. Elapsed time: ", elapsed_time(start_time), "\n")
 
   # Chimera removal
@@ -242,9 +244,11 @@ if (mode == "se") {
   }
 
   log_step("Step 2: learnErrors (forward & reverse)")
-  errF <- learnErrors(filtFs, multithread = threads, randomize = TRUE, nbases = 1e8)
-  errR <- learnErrors(filtRs, multithread = threads, randomize = TRUE, nbases = 1e8)
-  cat("    Elapsed time: ", elapsed_time(start_time), "\n")
+  t2 <- Sys.time()
+  learnErrors(filtFs, multithread = threads, randomize = TRUE, nbases = 1e8)
+  learnErrors(filtRs, multithread = threads, randomize = TRUE, nbases = 1e8)
+  cat("    Elapsed time: ", elapsed_time(t2), "\n")
+
 
   log_step("Step 3: derepFastq, dada & mergePairs")
   start_time <- Sys.time()
