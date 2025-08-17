@@ -115,7 +115,9 @@ An end-to-end pipeline for 16S rRNA gene amplicon analysis — from raw SRA acce
 > **Note:** Ensure all scripts marked **✅ Required** are **installed and executable** before running the pipeline.
 
 
-## Reference Data
+##Data
+
+### 16S rRNA gene Blast DB
 Build a 16S rRNA reference database for verifying FASTQ content (optional but recommended).
 
 ```bash
@@ -165,13 +167,16 @@ cat SRA_Accessions.tab.live.run.public.add_experiment | \
 
 # Heuristic filter to keep 16S (allow mismatches/missing)
 head -n 1 SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics > SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s
+
 cat non_16s_keywords.list | grep -f - SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics > SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.non16s
+
 cat non_16s_keywords.list | grep -v -f - SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics >> SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s
+
 # recover possible 16S
 grep -i '16s' SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.non16s >> SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s
 ```
 
-> **File:** `SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s` *(mismatches/missing possible)*
+`SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s` *(mismatches/missing possible)*
 
 ### Batching Strategy
 > For large projects, split into batches to improve throughput and resilience.
@@ -198,9 +203,9 @@ cat 02_batch.bioproject.list | grep -F -w -f - \
   >> 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s
 ```
 
-> **Tip:** add more specific filters to exclude non‑16S records.
+**Tip:** adding more specific filters to exclude non‑16S records.
 
-### Step 2: Download with prefetch
+### Step 2: Downloading with prefetch
 *Adjust concurrency based on your network. Too many threads can waste CPU; too few underuse bandwidth.*
 
 ```bash
@@ -295,15 +300,15 @@ This new format contains base calls, simplified quality scores, and alignments. 
 
 
 
-### Step 4: Arrange FASTQ by BioProject
+### Step 4: Organizing FASTQ by BioProject
 ```bash
 fq_sorter.py --metadata 02_batch.SRA_Accessions.tab.live.run.public.add_experiment.amplicon.metagenomics.16s --fq-dir fq --threads 4 --header --out-root PROCESSING
 ```
+***all fq files were moved the corresponding folder***
 <p align="center">
   <img src="imgs/fq_sorter_result.png" alt="fq_sorter" width="860">
 </p>
 
->Note
 
 ***projectAcc_pe_illumina*** 
 
@@ -323,26 +328,49 @@ fq_sorter.py --metadata 02_batch.SRA_Accessions.tab.live.run.public.add_experime
 ### Step 5: run dd2_pipeline.sh 
 
 ```text
-📄 seqkit  ➡️  ✂️ fastp  ➡️  ✂️ cutadapt  ➡️  🧬 DADA2 (PE | SE)  
-
-                                               ⬇️ low merged ratio  
-                                               🧬 DADA2 (SE)  
-                                               ⬇️  
-🧹 cleanup  ➡️  ✅ done
+1. 📄 seqkit  -> seqkit.stat.tsv
+2. ✂️ fastp   -> fastp.filter.tsv
+3. ✂️ cutadapt -> cutadapt_details.tsv + cutadapt.summary.tsv
+4. 🧬 DADA2 (PE | SE) (illumina|roche454|iontorrent)  
+4.1 if dada2 pe modes, 25% samples lost half reads, re-dada2 in SE mode -> reads_lost_ratio.tsv + reads_lost_ratio.summary.tsv - 03_dada2/dada2_filtered(rm)
+4.2 finished -> seqtab.nochim.rds + track.summary.tsv
+5. 🧹 cleanup  00_fq 01_fastp 02_cutadapt
 ```
+
+
+**parallel using tmux [tmux](https://www.howtogeek.com/671422/how-to-use-tmux-on-linux-and-why-its-better-than-screen/)**
 ```bash
 # PE
 cd PROCESSING
-ls -d */ | grep 'pe_illumina' | while read a;do echo ${a} && cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix .fastq.gz --threads 40 --mode SE --platform illumina && cd -;done
+ls -d */ | grep 'pe_illumina' > pe_illumina_jobs
+
+tmux new -s jobs1_20
+conda activate dada2
+cd PROCESSING/
+sed -n '1,20p' pe_illumina_jobs | while read a;do echo ${a} && cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix .fastq.gz --threads 20 --mode SE --platform illumina && cd -;done
+
+tmux new -s jobs21_40
+sed -n '21,40p' pe_illumina_jobs | while read a;do echo ${a} && cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix .fastq.gz --threads 20 --mode SE --platform illumina && cd -;done
+
 
 # for SE
 # # find PE reads, not finished project
-ls -d */ | grep 'se_illumina' | while read a;do echo ${a} && cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix .fastq.gz --threads 40 --mode SE --platform illumina && cd -;done
-
-# for PE SE mixed project
-# check and manually
+ls -d */ | grep 'se_illumina' > se_illumina_jobs 
+cat se_illumina_jobs | while read a;do echo ${a} && cd ${a} && dd2_pipeline.sh --input_dir 00_fq --r1_suffix .fastq.gz --threads 20 --mode SE --platform illumina && cd -;done
 ```
-**Finished bioproject**
+
+***dada2 is the most time consuming step, low cpu efficiency, even you set it to 24, 16-24 enough***
+<p align="center">
+  <img src="imgs/cpu_use.png" alt="fq_sorter" width="860">
+</p>
+
+***using tmux to open multiple consoles***
+
+<p align="center">
+  <img src="imgs/tmuxls.png" alt="fq_sorter" width="860">
+</p>
+
+***Finished bioproject***
 <p align="center">
   <img src="imgs/finished_bioproject_follder.png" alt="fq_sorter" width="860">
 </p>
@@ -382,21 +410,11 @@ target_project/accession_1.fastq.gz
 fq/accession.fastq.gz  # remove it
 ```
 ```bash
-# remove the 3rd fastq
+# remove the 3rd fastq or ignore them
 find fq -maxdepth 1 -type f -name '*.fastq.gz' ! -name '*_[12].fastq.gz' | sed 's/.fastq.gz//' |rush -j 50 --continue --eta -v FQ=fq -v PDIR=PAIRED 'if find {PDIR} -type f \( -name "{1}_1.fastq" -o -name "{1}_1.fastq.gz" \) -print -quit | grep -q .; then rm "{FQ}/{1}.fastq.gz" 2>/dev/null;fi'
 ```
-3. Single-end reads were marked as PAIRED in metadata
-```bash
-# if some fq files are not moved in fq. Check them 
 
-
-# 1 sometimes, sra will be split into 3 files
-# if the left fq files is the third fq for PE reads, remove it, like
-
-
-# 2 sometimes, some fq files are not moved properly, please check the metadata and move thme manually
-
-```
+2. Single-end reads were marked as PAIRED in metadata. Don't worry. We did not use the metadata to capture the layout, we get this info from fq files. PE if the accession has _1.fastq(.gz) _2.fastq(.gz)
 
 ---
 
@@ -443,8 +461,3 @@ Sample Count                : 502
 ## Notes
 - **Batching** improves stability on large cohorts; reruns can target failed batches only.
 - **Resource tuning**: Align `-j/--threads` with available CPU/IO bandwidth.
-- **Reproducibility**: Pin software versions; export conda envs / R session info.
-
----
-
-📌 *Built for scalability, reproducibility, and cross‑platform flexibility.*
