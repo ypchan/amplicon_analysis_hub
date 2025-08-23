@@ -45,6 +45,16 @@ Optional:
   --mem           INT         SLURM memory GB (default: ${mem_gb})
   --request_time  D-HH:MM:SS  SLURM walltime (default: ${walltime})
   -h, --help                  Show help
+
+Use:
+  # PE
+  dd2_pipeline.sh --input_dir 00_fq --r1_suffix _1.fastq.gz --r2_suffix _2.fastq.gz --threads 24 --mode PE --platform illumina
+  #SE
+  dd2_pipeline.sh --input_dir 00_fq --r1_suffix .fastq.gz --threads 24 --mode SE --platform illumina
+  # 454
+  dd2_pipeline.sh --input_dir 00_fq --r1_suffix .fastq.gz --threads 24 --mode SE --platform 454
+  # iontorrent
+  dd2_pipeline.sh --input_dir 00_fq --r1_suffix .fastq.gz --threads 24 --mode SE --platform iontorrent
 EOF
   exit 1
 }

@@ -151,7 +151,7 @@ if (mode == "se") {
   start_time <- Sys.time()
   filter.params <- list(
     maxN = 0, maxEE = 1, truncQ = 11, rm.phix = TRUE, minLen = 100,
-    compress = FALSE, multithread = threads, verbose = TRUE, n = 1e6
+    compress = FALSE, multithread = threads, verbose = TRUE, n = 1e7
   )
 
   if (platform == "iontorrent") {
@@ -165,7 +165,6 @@ if (mode == "se") {
       filter.params
     ))
   }
-  cat("    Elapsed time: ", elapsed_time(start_time), "\n")
 
   # Remove samples with zero reads after filtering
   if (any(filter_out[, "reads.out"] == 0)) {
@@ -179,11 +178,12 @@ if (mode == "se") {
     sample_names <- sample_names[!sample_names %in% failed_samples]
     filter_out  <- filter_out[!rownames(filter_out) %in% failed_fqs, ]
   }
+  cat("    Elapsed time: ", elapsed_time(start_time), "\n")
 
   log_step("Step 2: learnErrors")
-  t2 <- Sys.time()
-  learnErrors(filtFs, multithread = threads, randomize = TRUE, nbases = 1e8)
-  cat("    Elapsed time: ", elapsed_time(t2), "\n")
+  start_time <- Sys.time()
+  errF <- learnErrors(filtFs, multithread = threads, randomize = TRUE, nbases = 1e8)
+  cat("    Elapsed time: ", elapsed_time(start_time), "\n")
 
   # DADA denoising
   log_step("Step 3: derepFastq & dada denoising")
@@ -202,7 +202,6 @@ if (mode == "se") {
     }
     cat("    Elapsed time:", elapsed_time(start_time_sub), "\n")
   }
-
   cat("    derepFastq and denosing. Elapsed time: ", elapsed_time(start_time), "\n")
 
   # Chimera removal
@@ -223,7 +222,7 @@ if (mode == "se") {
     fwd = fastqFs, filt = filtFs,
     rev = fastqRs, filt.rev = filtRs,
     maxEE = 2, truncQ = 11, maxN = 0, rm.phix = TRUE,
-    compress = FALSE, verbose = TRUE, multithread = threads, n = 1e6
+    compress = FALSE, verbose = TRUE, multithread = threads, n = 1e7
   )
   cat("    Elapsed time: ", elapsed_time(start_time), "\n")
 
@@ -244,11 +243,9 @@ if (mode == "se") {
   }
 
   log_step("Step 2: learnErrors (forward & reverse)")
-  t2 <- Sys.time()
-  learnErrors(filtFs, multithread = threads, randomize = TRUE, nbases = 1e8)
-  learnErrors(filtRs, multithread = threads, randomize = TRUE, nbases = 1e8)
-  cat("    Elapsed time: ", elapsed_time(t2), "\n")
-
+  errF <- learnErrors(filtFs, multithread = threads, randomize = TRUE, nbases = 1e8)
+  errR <- learnErrors(filtRs, multithread = threads, randomize = TRUE, nbases = 1e8)
+  cat("    Elapsed time: ", elapsed_time(start_time), "\n")
 
   log_step("Step 3: derepFastq, dada & mergePairs")
   start_time <- Sys.time()
