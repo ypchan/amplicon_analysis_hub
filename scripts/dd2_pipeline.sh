@@ -285,7 +285,7 @@ else
   exit 1
 fi
 
-if [[ -f 03_dada2/suggestion.pe2se.note ]]; then
+if [[ -f 03_dada2/suggestion.pe2se.note && "$mode" == "pe" ]]; then
   warn "PE → SE suggested, rerunning dada2.R in SE mode"
   dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode SE --reads1_suffix $r1_suffix --threads $threads --platform $platform
 fi
