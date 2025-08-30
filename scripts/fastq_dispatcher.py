@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+
+# date: 2024-08-30 latest update
+# contact: yanpengch@qq.com
+#  
 """
 Bioproject-first FASTQ sorter with concurrency, PE/SE + platform split.
 
@@ -11,8 +14,8 @@ Metadata (TSV):
       col28 = LibraryLayout  (ignored for PE/SE decision)
       col30 = Platform
 
-Behavior:                                                               
-  1) For each accession, move FASTQs from --fq-dir into <OUT>/<BioProject>_<read_layout>_<platform>/00_fq/
+Behavior:
+  1) For each accession, move FASTQs from --fq-dir into <OUT>/<BioProject>_<readtype>_<platform>/00_fq/
      Expected names ONLY:
        PAIRED: {acc}_1.fastq(.gz), {acc}_2.fastq(.gz)
        SINGLE: {acc}.fastq(.gz)
@@ -21,7 +24,17 @@ Behavior:
   2) Per BioProject_<readtype>_<platform>:
        - Detect "3-file anomaly": an accession has BOTH pair (_1/_2) AND single (*.fastq(.gz))
          * append accession to sra_3_fq.note
-         * delete the "third" single file
+         * move the "third" single file to sra_3_fq/
+       - No marker files are created.
+  3) Print a summary line per project dir:
+       [QC] <dir>: PE=<n_pe>, SE=<n_se>, ANOM=<n_anom>
+
+Platform buckets (case-insensitive):
+  - illumina: illumina, hiseq, miseq, novaseq, nextseq
+  - bgi:      bgi, bgiseq, mgiseq, mgitech, dnbseq
+  - roche454: roche, 454
+  - iontorrent: ion, torrent
+  - unknown: everything else
 
 CLI:
   -m/--metadata  TSV path
@@ -63,14 +76,20 @@ def classify_platform_bucket(s: str) -> str:
 # ---------- Files expected per accession ----------
 
 def expected_paths(fq_dir: Path, acc: str) -> List[Path]:
-    """Return the 6 fixed-form candidates (if exist)."""
+    """Return the 12 fixed-form candidates (if exist)."""
     cands = [
         fq_dir / f"{acc}_1.fastq",
         fq_dir / f"{acc}_1.fastq.gz",
+        fq_dir / f"{acc}_1.fq",
+        fq_dir / f"{acc}_1.fq.gz",
         fq_dir / f"{acc}_2.fastq",
         fq_dir / f"{acc}_2.fastq.gz",
+        fq_dir / f"{acc}_2.fq",
+        fq_dir / f"{acc}_2.fq.gz",
         fq_dir / f"{acc}.fastq",
         fq_dir / f"{acc}.fastq.gz",
+        fq_dir / f"{acc}.fq",
+        fq_dir / f"{acc}.fq.gz",
     ]
     return [p for p in cands if p.exists() and p.is_file()]
 
@@ -78,8 +97,10 @@ def expected_paths(fq_dir: Path, acc: str) -> List[Path]:
 def is_pe_by_files(files: List[Path]) -> bool:
     """Infer PE if any of the files carries _1 or _2."""
     names = [p.name for p in files]
-    return any(n.endswith("_1.fastq") or n.endswith("_1.fastq.gz") or
-               n.endswith("_2.fastq") or n.endswith("_2.fastq.gz") for n in names)
+    return any(n.endswith("_1.fastq") or n.endswith("_1.fastq.gz") or 
+               n.endswith("_1.fq") or n.endswith("_1.fq.gz") or
+               n.endswith("_2.fastq") or n.endswith("_2.fastq.gz") or 
+               n.endswith("_2.fq") or n.endswith("_2.fq.gz") for n in names)
 
 
 def move_file(src: Path, dst_dir: Path, dry_run: bool) -> bool:
@@ -130,12 +151,17 @@ def analyze_project(proj_dir: Path, dry_run: bool) -> Tuple[int, int, int]:
         return (0, 0, 0)
 
     seen: Dict[str, Dict[str, Path]] = defaultdict(dict)
-    for p in fqdir.glob("*.fastq*"):
+    fq_files = list(fqdir.glob("*.fastq*")) + list(fqdir.glob("*.fq*"))
+    for p in fq_files:
         name = p.name
         if name.endswith(".fastq.gz"):
             stem = name[:-9]
         elif name.endswith(".fastq"):
             stem = name[:-6]
+        elif name.endswith(".fq.gz"):
+            stem = name[:-6]
+        elif name.endswith(".fq"):
+            stem = name[:-3]    
         else:
             continue
         if stem.endswith("_1"):

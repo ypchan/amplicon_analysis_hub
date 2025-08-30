@@ -12,7 +12,7 @@ mode="PE"
 platform="illumina"
 primer_file="/home/chenyanpeng/database/16s_primer.tsv"
 partition="cn"
-mem_gb=500
+mem_gb=500G
 walltime="10-00:00:00"
 slurm=false
 classifier=false
@@ -276,7 +276,7 @@ if [[ ! -f 03_dada2/track.summary.tsv ]]; then
   err "dada2.R error"
   exit 1
 fi
-if [[ $mode == "pe"]]; then
+if [[ $mode == "pe" ]]; then
   amplicon_reads_lost_check.sh -i 03_dada2/track.summary.tsv
 else
   amplicon_reads_lost_check.sh -i 03_dada2/track.summary.tsv &>/dev/null
