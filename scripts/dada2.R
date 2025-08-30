@@ -113,9 +113,9 @@ cat("\n           DADA2 Amplicon Analysis\n")
 cat("==============================================\n")
 cat("    Input directory : ", input_dir, "\n")
 cat("    Output directory: ", output_dir, "\n")
-cat("    Mode           : ", toupper(mode), "\n")
-cat("    Threads        : ", threads, "\n")
-cat("    Platform       : ", platform, "\n")
+cat("    Mode            : ", toupper(mode), "\n")
+cat("    Threads         : ", threads, "\n")
+cat("    Platform        : ", platform, "\n")
 
 # Create output directory if needed
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
@@ -182,7 +182,12 @@ if (mode == "se") {
 
   log_step("Step 2: learnErrors")
   start_time <- Sys.time()
-  errF <- learnErrors(filtFs, multithread = threads, randomize = TRUE, nbases = 1e8)
+  if (length(filtFs) == 0) {
+    stop("    No reads passed the filter")
+    unlink(filtpath, recursive = TRUE, force = TRUE)
+  } else {
+    errF <- learnErrors(filtFs, multithread = threads, randomize = TRUE, nbases = 1e8)
+  }
   cat("    Elapsed time: ", elapsed_time(start_time), "\n")
 
   # DADA denoising

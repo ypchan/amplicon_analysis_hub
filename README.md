@@ -114,8 +114,18 @@ An end-to-end pipeline for 16S rRNA gene amplicon analysis — from raw SRA acce
 
 > **Note:** Ensure all scripts marked **✅ Required** are **installed and executable** before running the pipeline.
 
+## Init setup
+```bash
+gh repo clone ypchan/5M16S
 
-##Data
+HOME_BIN='~/bin'
+mkdir -p "$HOME_BIN"
+cd 5M16S
+chmod 777 scripts/*
+ls scripts/ | xargs -n1 -I {} realpath {} | xargs -I {} ln -s {} "$HOME_BIN/"
+```
+
+## Data
 
 ### 16S rRNA gene Blast DB
 Build a 16S rRNA reference database for verifying FASTQ content (optional but recommended).
@@ -338,7 +348,7 @@ fq_sorter.py --metadata 02_batch.SRA_Accessions.tab.live.run.public.add_experime
 ```
 
 
-**parallel using tmux [tmux](https://www.howtogeek.com/671422/how-to-use-tmux-on-linux-and-why-its-better-than-screen/)**
+#### **parallel using tmux [tmux](https://www.howtogeek.com/671422/how-to-use-tmux-on-linux-and-why-its-better-than-screen/)**
 ```bash
 # PE
 cd PROCESSING
@@ -369,6 +379,97 @@ cat se_illumina_jobs | while read a;do echo ${a} && cd ${a} && dd2_pipeline.sh -
 <p align="center">
   <img src="imgs/tmuxls.png" alt="fq_sorter" width="860">
 </p>
+
+#### Running in slurm 
+```bash
+#!/bin/bash
+#SBATCH --job-name=dd2          # job name
+#SBATCH --partition=cn          # parttion name
+#SBATCH --output=%x_%A_%a.log   # stdout log
+#SBATCH --array=1-50%5          # 1000 tasks per 10 at once
+#SBATCH --cpus-per-task=12      # 12 cpu for each task, if 5 tasks run simultaneously, 12 * 5 = 60
+#SBATCH --mem=500G              # 500 GB per task, f 5 tasks run simultaneously, 500 G * 5 = 2.5T
+#SBATCH --time=10-00:00:00      # 10 days
+
+source /home/software/miniconda3/etc/profile.d/conda.sh
+conda activate dada2
+
+HOME_DIR="/home/chenyanpeng/project/pacearchaeales.20250408/24_ncbi_amplicon/57.download.finished.project.fq"
+cd "${HOME_DIR}"
+
+PROJECT_DIR=$(ls */ -d | sed -n "${SLURM_ARRAY_TASK_ID}p")
+BASENAME=$(basename "${PROJECT_DIR}")
+
+# redirect std out and std err to specidied log
+exec > "${BASENAME}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}.log" 2>&1
+
+cd "${PROJECT_DIR}"
+echo "##### ${BASENAME}"
+echo "pwd: $(pwd)"
+
+INPUT_DIR="00_fq"
+MODE=""
+PLATFORM=""
+R1_SUFFIX=""
+R2_SUFFIX=""
+THREADS=12
+
+if [[ "$BASENAME" == *pe_illumina || "$BASENAME" == *pe_bgi ]]; then
+  MODE="PE"
+  PLATFORM="illumina"
+  R1_SUFFIX="_1.fastq.gz"
+  R2_SUFFIX="_2.fastq.gz"
+elif [[ "$BASENAME" == *se_illumina || "BASENAME" == *se_bgi ]]; then
+  MODE="SE"
+  PLATFORM="illumina"
+  R1_SUFFIX=".fastq.gz"
+elif [[ "$BASENAME" == *se_roche454 ]]; then
+  MODE="SE"
+  PLATFORM="454"
+  R1_SUFFIX=".fastq.gz"
+elif [[ "$BASENAME" == *se_iontorrent ]]; then
+  MODE="SE"
+  PLATFORM="iontorrent"
+  R1_SUFFIX=".fastq.gz"
+else
+  echo "ERROR: unknown $BASENAME"
+  echo " only match：*pe_illumina | *pe_bgi | *se_illumina | *se_roche | *se_iontorrent"
+  exit 3
+fi
+
+echo "start：dd2_pipeline.sh \\"
+echo "  --input_dir ${INPUT_DIR} \\"
+echo "  --threads ${THREADS} \\"
+echo "  --mode ${MODE} \\"
+echo "  --platform ${PLATFORM} \\"
+if [[ "$MODE" == "PE" ]]; then
+  echo "  --r1_suffix ${R1_SUFFIX} \\"
+  echo "  --r2_suffix ${R2_SUFFIX}"
+else
+  echo "  --r1_suffix ${R1_SUFFIX}"
+fi
+
+# ---- running ----
+if [[ "$MODE" == "PE" ]]; then
+  dd2_pipeline.sh \
+    --input_dir "$INPUT_DIR" \
+    --r1_suffix "$R1_SUFFIX" \
+    --r2_suffix "$R2_SUFFIX" \
+    --threads "$THREADS" \
+    --mode "$MODE" \
+    --platform "$PLATFORM"
+else
+  dd2_pipeline.sh \
+    --input_dir "$INPUT_DIR" \
+    --r1_suffix "$R1_SUFFIX" \
+    --threads "$THREADS" \
+    --mode "$MODE" \
+    --platform "$PLATFORM"
+fi
+```
+
+
+### Results
 
 ***Finished bioproject***
 <p align="center">

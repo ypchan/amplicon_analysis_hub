@@ -276,7 +276,11 @@ if [[ ! -f 03_dada2/track.summary.tsv ]]; then
   err "dada2.R error"
   exit 1
 fi
-amplicon_reads_lost_check.sh -i 03_dada2/track.summary.tsv
+if [[ $mode == "pe"]]; then
+  amplicon_reads_lost_check.sh -i 03_dada2/track.summary.tsv
+else
+  amplicon_reads_lost_check.sh -i 03_dada2/track.summary.tsv &>/dev/null
+fi
 
 if [[ -f 03_dada2/reads_lost_ratio.summary.tsv ]]; then
   log "amplicon_reads_lost_check.sh finished"
