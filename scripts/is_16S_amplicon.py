@@ -1,19 +1,38 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-is_16s_amplicon - I/O-optimized, concurrent 16S amplicon checker with BLAST.
+is_16s_amplicon - 16S amplicon checker with BLAST.
 
-Now: --threads means threads PER JOB. Total threads ≈ threads * concurrent.
+Threads:
+  --threads means threads PER JOB (per sample).
+    Total threads ≈ threads * concurrent.
 
 Features:
   - Pure pipeline (no temp files): seqkit head | seqkit fq2fa | blastn -query -
-  - Multi-sample concurrency: process many samples in parallel
-  - Streamed output: each sample prints as soon as it finishes
-  - STDIN or argv inputs; stdout formats: table / tsv / csv
+  - Multi-sample concurrency (process many samples in parallel)
+  - Streamed output (each sample prints as soon as it finishes)
+  - STDIN or argv inputs
+  - STDOUT formats: table / tsv / csv
   - Optional --output writes streamed results to a file (tsv/csv)
 
 Examples:
-  ls fq/*.gz | python3 is_16s_amplicon.py - --threads 4 --concurrent 3 --nreads 500
-  # Total threads ≈ 4 * 3 = 12
+  # 1) Read sample list from stdin (with shell globbing). Total threads ≈ 4 * 3 = 12
+  ls fq/*.fastq.gz | python3 is_16s_amplicon.py - --threads 4 --concurrent 3 --nreads 50
+
+  # 2) Mixed inputs: both '-' (stdin) and explicit paths
+  printf "fq/A.fastq.gz\nfq/B.fastq.gz\n" | python3 is_16s_amplicon.py - fq/C.fastq.gz fq/D.fastq.gz -t 8 -c 2 -n 1000 --format tsv
+
+  # 3) Specify BLAST DB and write results to file
+  ls fq/*.gz | python3 is_16s_amplicon.py - -d /share/cn1_fs/database/dada2_gtdb_ref/arch_bac_nr_16s \
+    -n 800 -t 6 -c 4 --format csv -o 16s_screen.tsv --out-format tsv
+
+  # 4) Show aligned table on terminal only
+  python3 is_16s_amplicon.py fq/A.fastq.gz fq/B.fastq.gz --format table
+
+Requirements:
+  - seqkit >= 2.x
+  - BLAST+ (blastn) available, --db points to a valid 16S reference DB
+  - Enough file handles & CPU: total threads ≈ --threads * --concurrent
 """
 
 import argparse
@@ -27,7 +46,7 @@ from typing import Dict, Any, List, Tuple
 HEADER = ["sample_id", "bac_hits", "arch_hits", "total_hits", "total_percent", "is_16S"]
 
 
-# ------------ I/O-optimized single-sample runner ------------
+# ------------ Single-sample BLAST pipeline runner ------------
 def run_blast_stream(
     fq_path: Path,
     db: str,
@@ -39,17 +58,17 @@ def run_blast_stream(
     Pipeline:
       seqkit head (sample N reads) ->
       seqkit fq2fa (FASTQ->FASTA) ->
-      blastn -query - (read from stdin), outfmt 6
-    Parse BLAST lines on the fly, count unique qseqid passing identity.
+      blastn -query - (reads fasta from stdin), outfmt 6
+    Parse BLAST output line by line, count unique qseqid passing identity.
     """
     sample_name = fq_path.name
 
-    # p1: sample N reads
+    # Step 1: take N reads
     p1 = subprocess.Popen(
         ["seqkit", "head", "-j", str(max(1, threads_per_job)), "-n", str(nreads), str(fq_path)],
         stdout=subprocess.PIPE,
     )
-    # p2: fastq -> fasta
+    # Step 2: FASTQ -> FASTA
     p2 = subprocess.Popen(
         ["seqkit", "fq2fa", "-j", str(max(1, threads_per_job)), "-"],
         stdin=p1.stdout,
@@ -58,14 +77,14 @@ def run_blast_stream(
     if p1.stdout is not None:
         p1.stdout.close()
 
-    # p3: blastn reads fasta from stdin
+    # Step 3: run BLAST, read fasta from stdin
     p3 = subprocess.Popen(
         [
             "blastn", "-query", "-", "-db", db,
             "-evalue", "1e-5",
             "-outfmt", "6 qseqid sseqid pident length qlen slen",
             "-num_threads", str(max(1, threads_per_job)),
-            "-max_target_seqs", "5",     # keep 5 to avoid BLAST warning
+            "-max_target_seqs", "5",   # keep 5 to suppress BLAST warning
             "-max_hsps", "1",
             "-task", "megablast",
             "-word_size", "28",
@@ -80,11 +99,11 @@ def run_blast_stream(
     if p2.stdout is not None:
         p2.stdout.close()
 
-    # Stream-parse BLAST output
+    # Parse BLAST output
     hits: Dict[str, str] = {}
     assert p3.stdout is not None
     for line in p3.stdout:
-        parts = line.rstrip("\n").split("\t")   # qseqid sseqid pident length qlen slen
+        parts = line.rstrip("\n").split("\t")
         if len(parts) < 3:
             continue
         try:
@@ -93,12 +112,12 @@ def run_blast_stream(
             continue
         if pid >= identity:
             qid, sid = parts[0], parts[1]
-            if qid not in hits:                # count each read once
+            if qid not in hits:  # count each read only once
                 hits[qid] = sid
 
     p3.stdout.close()
 
-    # Ensure all subprocesses ended successfully
+    # Check all subprocesses ended successfully
     for proc in (p1, p2, p3):
         proc.wait()
         if proc.returncode not in (0, None):
@@ -108,7 +127,7 @@ def run_blast_stream(
     bac_hits = sum(1 for sid in hits.values() if str(sid).startswith("bacteria__"))
     arch_hits = sum(1 for sid in hits.values() if str(sid).startswith("archaea__"))
     percent_hits = 100.0 * total_hits / max(1, nreads)
-    is_amplicon = "YES" if percent_hits >= 50.0 else "NO"
+    is_amplicon = "YES" if percent_hits >= 90.0 else "NO"
 
     return {
         "sample_id": sample_name,
@@ -122,7 +141,7 @@ def run_blast_stream(
 
 # ---------------- Input & formatting helpers ----------------
 def gather_inputs(argv_inputs: List[str]) -> List[str]:
-    """Allow mixing '-' (stdin) and explicit file paths."""
+    """Collect inputs; allow mixing '-' (stdin) and explicit file paths."""
     files: List[str] = []
     for tok in argv_inputs:
         if tok == "-":
@@ -136,7 +155,7 @@ def gather_inputs(argv_inputs: List[str]) -> List[str]:
 
 
 def make_table_formatter(inputs: List[str]) -> Tuple[str, dict]:
-    """Estimate widths for a neat streaming table."""
+    """Compute column widths for a nicely aligned table."""
     widths = {h: len(h) for h in HEADER}
     if inputs:
         max_sample_len = max(len(Path(f).name) for f in inputs)
@@ -147,10 +166,33 @@ def make_table_formatter(inputs: List[str]) -> Tuple[str, dict]:
 
 # ------------------------------- Main -------------------------------
 def main():
-    ap = argparse.ArgumentParser(description="I/O-optimized, concurrent 16S amplicon checker (BLAST).")
+    ap = argparse.ArgumentParser(
+        description="16S amplicon checker (BLAST).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples
+--------
+1) Read list from stdin (shell globbing):
+   ls fq/*.fastq.gz | is_16s_amplicon.py - --threads 4 --concurrent 3 --nreads 500
+
+2) Mixed inputs (stdin + explicit paths):
+   printf "fq/A.fastq.gz\\nfq/B.fastq.gz\\n" | is_16s_amplicon.py - fq/C.fastq.gz --format tsv
+
+3) Write results to file:
+   ls fq/*.gz | is_16s_amplicon.py - -o results/out.tsv --out-format tsv
+
+4) Join with upstream filters (paired-end only):
+   comm -12 <(ls fq | sed -E 's/(_[12])?\\.fastq\\.gz//' | sort -u) <(some_list | sort -u) \\
+   | awk '{printf "fq/%s_1.fastq.gz\\nfq/%s_2.fastq.gz\\n",$1,$1}' \\
+   | is_16s_amplicon.py - -t 4 -c 3 -n 500 --format csv
+""",
+    )
     ap.add_argument("inputs", nargs="+", help="FASTQ paths; use '-' to read from stdin (can be mixed)")
-    ap.add_argument("-d", "--db", default="/share/cn1_fs/database/dada2_gtdb_ref/arch_bac_nr_16s",
-                    help="BLAST database prefix")
+    ap.add_argument(
+        "-d", "--db",
+        default="/share/cn1_fs/database/dada2_gtdb_ref/arch_bac_nr_16s",
+        help="BLAST database prefix",
+    )
     ap.add_argument("-n", "--nreads", type=int, default=1000,
                     help="Number of reads to sample per file (default: 1000)")
     ap.add_argument("-p", "--identity", type=float, default=60.0,
@@ -171,11 +213,11 @@ def main():
     if not files:
         sys.exit("No input files.")
 
-    # Concurrency semantics: threads_per_job = args.threads (per job)
+    # Concurrency: threads_per_job = args.threads (per sample)
     concurrent = max(1, args.concurrent)
-    threads_per_job = max(1, args.threads)  # per job threads; total ≈ threads_per_job * concurrent
+    threads_per_job = max(1, args.threads)
 
-    # stdout writer (streaming)
+    # STDOUT writer
     out_writer = None
     fmt = None
     if args.format == "tsv":
@@ -184,11 +226,11 @@ def main():
     elif args.format == "csv":
         out_writer = csv.DictWriter(sys.stdout, fieldnames=HEADER, lineterminator="\n")
         out_writer.writeheader(); sys.stdout.flush()
-    else:  # table
+    else:  # aligned table
         fmt, _ = make_table_formatter(files)
         print(fmt.format(**{h: h for h in HEADER}), flush=True)
 
-    # optional file writer (streaming)
+    # Optional file writer
     file_writer = None
     f_handle = None
     if args.output:
@@ -202,7 +244,7 @@ def main():
             file_writer = csv.DictWriter(f_handle, fieldnames=HEADER, lineterminator="\n")
         file_writer.writeheader()
 
-    # run concurrently; print each result as soon as it finishes
+    # Run concurrently, print results as soon as ready
     try:
         with ThreadPoolExecutor(max_workers=concurrent) as ex:
             fut2file = {
@@ -220,13 +262,13 @@ def main():
             for fut in as_completed(fut2file):
                 res = fut.result()
 
-                # stdout
+                # print to STDOUT
                 if args.format == "table":
                     print(fmt.format(**{h: str(res[h]) for h in HEADER}), flush=True)
                 else:
                     out_writer.writerow(res); sys.stdout.flush()
 
-                # optional file
+                # also write to file
                 if file_writer:
                     file_writer.writerow(res)
                     f_handle.flush()
