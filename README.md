@@ -104,7 +104,7 @@ An end-to-end pipeline for 16S rRNA gene amplicon analysis — from raw SRA acce
 | `dada2.R`                  | ✅       | R        | Stable     | **Wrapper for DADA2** to infer ASVs and produce QC summaries. |
 | `dd2_pipeline.sh`          | ✅       | Shell    | Stable     | **Main pipeline driver**: orchestrates `seqkit → fastp → cutadapt → DADA2` (PE/SE). |
 | `fastq_dispatcher.py`             | ✅       | Python   | Stable     | **Arrange downloaded FASTQ files by metadata** (e.g., BioProject, platform, PE/SE) into `PROJECT/00_fq/`. |
-| `is_16S_amplicon.py`       | —        | Python   | Stable     | **Verify whether data were generated from 16S rRNA amplicon sequencing** (e.g., via reference hits). |
+| `is_16s_amplicon.py`       | —        | Python   | Stable     | **Verify whether data were generated from 16S rRNA amplicon sequencing** (e.g., via reference hits). |
 | `merge_seqtab_nochim_rds.R`| —        | R        | Developing | **Merge DADA2 `seqtab_nochim` RDS files** across runs/projects. |
 | `ontology_infer.py`        | —        | Python   | Developing | **Ontology inference** utilities for downstream metadata/label prediction. |
 | `ontology_train_cv.py`     | —        | Python   | Developing | **Ontology training & cross-validation** helpers. |
@@ -116,7 +116,9 @@ An end-to-end pipeline for 16S rRNA gene amplicon analysis — from raw SRA acce
 
 ## Init setup
 ```bash
-gh repo clone ypchan/5M16S
+# gh repo clone ypchan/5M16S # not public
+# download id manually, unzip it
+cd 5M16S
 
 bash setup.sh
 ```
