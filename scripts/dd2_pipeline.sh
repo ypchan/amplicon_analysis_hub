@@ -153,14 +153,17 @@ fi
 log "Step 0: Check if data is 16S amplicon sequencing"
 start_t=$(date +%s)
 find "$INPUT_DIR" -type f -name "*$R1_SUFFIX" \
-  | is_16s_amplicon.py - --db "${BLASTDB_16S}" \
+  | is_16s_amplicon.py - --db "$BLASTDB_16S" \
       --nreads 100 --threads 1 --concurrent "$THREADS" --format tsv \
       --output is_16s.tsv 1>/dev/null 2> is_16s.err
+
+[[ -s is_16s.err ]] || rm -f is_16s.err
 [[ -s is_16s.tsv ]] || { err "is_16s.tsv not generated or empty"; exit 1; }
 
 NON_16S_COUNT=$(awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv | wc -l)
-echo "    non-16S sample count: $NON_16S_COUNT"
+echo "    non-16s rRAN amplicon sample count: $NON_16S_COUNT"
 
+# Remove non-16S samples
 awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv \
   | sed "s/${R1_SUFFIX}//" \
   | while read -r a;do \
@@ -171,13 +174,14 @@ awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv \
           "$INPUT_DIR/${a}${R1_SUFFIX:-}" \
           "$INPUT_DIR/${a}${R2_SUFFIX:-}"
     done
+
 if [[ $MODE == "pe" ]]; then
-  fqfiles=$(find "$INPUT_DIR" -type f \( -name "*$R1_SUFFIX" -o -name "*$R2_SUFFIX" \))
+  FQ_FILES=$(find "$INPUT_DIR" -type f \( -name "*$R1_SUFFIX" -o -name "*$R2_SUFFIX" \))
 else
-  fqfiles=$(find "$INPUT_DIR" -type f -name "*$R1_SUFFIX")
+  FQ_FILES=$(find "$INPUT_DIR" -type f -name "*$R1_SUFFIX")
 fi
 elapsed $start_t
-[[ -z "$fqfiles" ]] && { err "No matching files found after removing non-16S samples."; exit 0; }
+[[ -z "$FQ_FILES" ]] && { err "No matching files found after removing non-16S samples."; exit 0; }
 echo ""
 
 #─────────────── Step 1: FASTQ Statistics ──────
@@ -186,15 +190,15 @@ start_t=$(date +%s)
 
 if [[ -f seqkit.stat.tsv ]]; then
   existing_count=$(($(wc -l < seqkit.stat.tsv) - 1))
-  new_count=$(echo "$fqfiles" | wc -l)
+  new_count=$(echo "$FQ_FILES" | wc -l)
   if [[ "$existing_count" -eq "$new_count" ]]; then
     log "seqkit.stat.tsv exists and file count matches. Skipping seqkit stats."
   else
     warn "File count changed. Re-running seqkit stats..."
-    seqkit stats -j "$THREADS" $fqfiles | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
+    seqkit stats -j "$THREADS" $FQ_FILES | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
   fi
 else
-  seqkit stats -j "$THREADS" $fqfiles | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
+  seqkit stats -j "$THREADS" $FQ_FILES | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
 fi
 elapsed $start_t
 echo ""
