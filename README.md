@@ -115,8 +115,17 @@ An end-to-end pipeline for 16S rRNA gene amplicon analysis — from raw SRA acce
 > **Note:** Ensure all scripts marked **✅ Required** are **installed and executable** before running the pipeline.
 
 ## Init setup
+
 ```bash
-# gh repo clone ypchan/5M16S # not public
+gh repo clone ypchan/5M16S # not public
+cd 5M16S
+bash setup.sh
+```
+<p align="center">
+  <img src="imgs/gh_repo.png" alt="fq_sorter" width="860">
+</p>
+
+```bash
 # download id manually, unzip it
 unzip 5M16S-main.zip
 mv 5M16S-main 5M16S && rm 5M16S-main.zip
