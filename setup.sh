@@ -9,10 +9,9 @@ else
   C0=""; Cg=""; Cy=""; Cr=""; Cb=""
 fi
 ts(){ date '+[%F %T]'; }
-log(){  printf '%s [%sINFO%s ] %s\n'  "$(ts)" "$Cb" "$C0" "$*"; }
-warn(){ printf '%s [%sWARN%s ] %s\n'  "$(ts)" "$Cy" "$C0" "$*"; }
-ok(){   printf '%s [%sOK%s   ] %s\n'   "$(ts)" "$Cg" "$C0" "$*"; }
-err(){  printf '%s [%sERROR%s] %s\n'  "$(ts)" "$Cr" "$C0" "$*" >&2;exit 1; }
+log(){  printf '%s [%sINFO%s] %s\n'  "$(ts)" "$Cb" "$C0" "$*"; }
+ok(){   printf '%s [ %sOK%s ] %s\n'   "$(ts)" "$Cg" "$C0" "$*"; }
+err(){  printf '%s [%sERR%s ] %s\n'  "$(ts)" "$Cr" "$C0" "$*" >&2;exit 1; }
 
 
 INSTALL_HOME=$(realpath .)
@@ -78,7 +77,7 @@ ls scripts | while read a;do
 done
 
 ls scripts | while read a;do 
-    command -v "$a"
+    command -v "$a" &>/dev/null
     if [[ $? -ne 0 ]]; then 
         err "$a not in PATH, please check"
     else
@@ -87,7 +86,7 @@ ls scripts | while read a;do
 done
 
 #  -- prepare databases
-log "16S blast db"
+log "Constructing 16S rRNA gene blast db"
 DB_NOTE="blastn.$(blastn -version | head -n 1 |awk '{print $2}')"
 if [ -f "data/arc_bac_16s_blastDB/$DB_NOTE" ];then
     ok "blast db already prepared, skip"
