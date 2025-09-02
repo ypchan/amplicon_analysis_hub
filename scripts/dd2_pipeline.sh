@@ -154,7 +154,7 @@ log "Step 0: Check if data is 16S amplicon sequencing"
 start_t=$(date +%s)
 find "$input_dir" -type f -name "*$R1_SUFFIX" \
   | is_16s_amplicon.py - --db "${BLASTDB_16S}" \
-      --nreads 1000 --threads 1 --concurrent "$THREADS" --format tsv \
+      --nreads 100 --threads 1 --concurrent "$THREADS" --format tsv \
       --output is_16s.tsv 1>/dev/null 2> is_16s.err
 [[ -s is_16s.tsv ]] || { err "is_16s.tsv not generated or empty"; exit 1; }
 
