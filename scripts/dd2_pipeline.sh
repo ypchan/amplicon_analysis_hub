@@ -144,15 +144,15 @@ if [[ -f dd2_finished.note ]]; then
 fi
 
 #─────────────── Input Check ────────────────
-if [[ ! -d "$input_dir" ]]; then
-  err "Input directory not found: $input_dir"
+if [[ ! -d "$INPUT_DIR" ]]; then
+  err "Input directory not found: $INPUT_DIR"
   exit 1
 fi
 
 #─────────────── Step 1: is 16s amplicon data? ──────
 log "Step 0: Check if data is 16S amplicon sequencing"
 start_t=$(date +%s)
-find "$input_dir" -type f -name "*$R1_SUFFIX" \
+find "$INPUT_DIR" -type f -name "*$R1_SUFFIX" \
   | is_16s_amplicon.py - --db "${BLASTDB_16S}" \
       --nreads 100 --threads 1 --concurrent "$THREADS" --format tsv \
       --output is_16s.tsv 1>/dev/null 2> is_16s.err
@@ -162,19 +162,19 @@ NON_16S_COUNT=$(awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv | wc -l)
 echo "    non-16S sample count: $NON_16S_COUNT"
 
 awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv \
-  | sed "s/${r1_suffix}//" \
+  | sed "s/${R1_SUFFIX}//" \
   | while read -r a;do \
       # Remove PE or SE reads
-      rm -f "$input_dir/${a}_1.fastq.gz" \
-          "$input_dir/${a}_2.fastq.gz" \
-          "$input_dir/${a}.fastq.gz" \
-          "$input_dir/${a}${r1_suffix:-}" \
-          "$input_dir/${a}${r2_suffix:-}"
+      rm -f "$INPUT_DIR/${a}_1.fastq.gz" \
+          "$INPUT_DIR/${a}_2.fastq.gz" \
+          "$INPUT_DIR/${a}.fastq.gz" \
+          "$INPUT_DIR/${a}${R1_SUFFIX:-}" \
+          "$INPUT_DIR/${a}${R2_SUFFIX:-}"
     done
 if [[ $MODE == "pe" ]]; then
-  fqfiles=$(find "$input_dir" -type f \( -name "*$R1_SUFFIX" -o -name "*$R2_SUFFIX" \))
+  fqfiles=$(find "$INPUT_DIR" -type f \( -name "*$R1_SUFFIX" -o -name "*$R2_SUFFIX" \))
 else
-  fqfiles=$(find "$input_dir" -type f -name "*$R1_SUFFIX")
+  fqfiles=$(find "$INPUT_DIR" -type f -name "*$R1_SUFFIX")
 fi
 elapsed $start_t
 [[ -z "$fqfiles" ]] && { err "No matching files found after removing non-16S samples."; exit 0; }
@@ -191,10 +191,10 @@ if [[ -f seqkit.stat.tsv ]]; then
     log "seqkit.stat.tsv exists and file count matches. Skipping seqkit stats."
   else
     warn "File count changed. Re-running seqkit stats..."
-    seqkit stats -j "$THREADS" $fqfiles | sed "s|$input_dir/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
+    seqkit stats -j "$THREADS" $fqfiles | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
   fi
 else
-  seqkit stats -j "$THREADS" $fqfiles | sed "s|$input_dir/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
+  seqkit stats -j "$THREADS" $fqfiles | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
 fi
 elapsed $start_t
 echo ""
@@ -203,14 +203,14 @@ echo ""
 log "Step 2: QC using fastp"
 start_t=$(date +%s)
 mkdir -p 01_fastp
-sample_list=$(find "$input_dir" -maxdepth 2 -name "*$R1_SUFFIX" -exec basename {} \; | sed "s/$R1_SUFFIX//")
+sample_list=$(find "$INPUT_DIR" -maxdepth 2 -name "*$R1_SUFFIX" -exec basename {} \; | sed "s/$R1_SUFFIX//")
 
 if [[ "$MODE" == "pe" ]]; then
-  echo "$sample_list" | rush -j "$THREADS" -v r1="$R1_SUFFIX",r2="$R2_SUFFIX",input_dir="$input_dir" \
+  echo "$sample_list" | rush -j "$THREADS" -v r1="$R1_SUFFIX",r2="$R2_SUFFIX",input_dir="$INPUT_DIR" \
     --continue --eta --succ-cmd-file fastp.rush.finished \
     'fastp -i {input_dir}/{1}{r1} -I {input_dir}/{1}{r2} -o 01_fastp/{1}{r1} -O 01_fastp/{1}{r2} --thread 1 --length_required 100 --n_base_limit 0 --cut_tail --qualified_quality_phred 20 --unqualified_percent_limit 20 --html /dev/null --json /dev/null &> 01_fastp/{1}.fastp.log'
 else
-  echo "$sample_list" | rush -j "$THREADS" -v r1="$R1_SUFFIX",input_dir="$input_dir" \
+  echo "$sample_list" | rush -j "$THREADS" -v r1="$R1_SUFFIX",input_dir="$INPUT_DIR" \
     --continue --eta --succ-cmd-file fastp.rush.finished \
     'fastp -i {input_dir}/{1}{r1} -o 01_fastp/{1}{r1} --thread 1 --length_required 100 --n_base_limit 0 --cut_tail --qualified_quality_phred 20 --unqualified_percent_limit 20 --html /dev/null --json /dev/null &> 01_fastp/{1}.fastp.log'
 fi
