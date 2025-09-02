@@ -18,7 +18,7 @@ INSTALL_HOME=$(realpath .)
 log "Installing to $INSTALL_HOME"
 # ------ biosoftwares dependency
 REQUIREMENTS=("python3" "Rscript" "blastn" "makeblastdb" \
-            "cd-hit" "fastp" "seqkit" "cutadapt" "rush")
+            "cd-hit" "fastp" "seqkit" "cutadapt" "rush" "dos2unix")
 
 for cmd in "${REQUIREMENTS[@]}"; do
     command -v "$cmd" &>/dev/null
@@ -59,6 +59,7 @@ else
 fi 
 
 # -- make scripts executable
+dos2unix scripts/*  
 chmod 755 scripts/*.py scripts/*.R scripts/*.sh
 
 if [ $? -ne 0 ]; then
@@ -103,7 +104,7 @@ if [ ! -f "$PRIMER_FILE" ];then
 fi
 sed -i "s|^PRIMER_FILE=.*$|PRIMER_FILE=\"$PRIMER_FILE\"|" scripts/dd2_pipeline.sh
 
-BLASTDB_16S="$INSTALL_HOME/data/arc_bac_16s_blastDB/arch_bac_16s_ref_90.ndb"
+BLASTDB_16S="$INSTALL_HOME/data/arc_bac_16s_blastDB/arch_bac_16s_ref_90.nhr"
 if [[ ! -f "$BLASTDB_16S" ]];then
     err "$BLASTDB_16S not found, please check"
 fi
