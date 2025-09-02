@@ -118,11 +118,7 @@ An end-to-end pipeline for 16S rRNA gene amplicon analysis — from raw SRA acce
 ```bash
 gh repo clone ypchan/5M16S
 
-HOME_BIN='~/bin'
-mkdir -p "$HOME_BIN"
-cd 5M16S
-chmod 777 scripts/*
-ls scripts/ | xargs -n1 -I {} realpath {} | xargs -I {} ln -s {} "$HOME_BIN/"
+bash setup.sh
 ```
 
 ## Data
