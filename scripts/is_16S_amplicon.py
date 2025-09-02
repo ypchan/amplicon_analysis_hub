@@ -127,7 +127,7 @@ def run_blast_stream(
     bac_hits = sum(1 for sid in hits.values() if str(sid).startswith("bacteria__"))
     arch_hits = sum(1 for sid in hits.values() if str(sid).startswith("archaea__"))
     percent_hits = 100.0 * total_hits / max(1, nreads)
-    is_amplicon = "YES" if percent_hits >= 90.0 else "NO"
+    is_amplicon = "YES" if percent_hits >= 50.0 else "NO"
 
     return {
         "sample_id": sample_name,
@@ -173,7 +173,7 @@ def main():
 Examples
 --------
 1) Read list from stdin (shell globbing):
-   ls fq/*.fastq.gz | is_16s_amplicon.py - --threads 4 --concurrent 3 --nreads 500
+   ls fq/*.fastq.gz | is_16s_amplicon.py - --threads 4 --concurrent 3 --nreads 1000
 
 2) Mixed inputs (stdin + explicit paths):
    printf "fq/A.fastq.gz\\nfq/B.fastq.gz\\n" | is_16s_amplicon.py - fq/C.fastq.gz --format tsv
@@ -193,8 +193,8 @@ Examples
         default="/share/cn1_fs/database/dada2_gtdb_ref/arch_bac_nr_16s",
         help="BLAST database prefix",
     )
-    ap.add_argument("-n", "--nreads", type=int, default=1000,
-                    help="Number of reads to sample per file (default: 1000)")
+    ap.add_argument("-n", "--nreads", type=int, default=100,
+                    help="Number of reads to sample per file (default: 100)")
     ap.add_argument("-p", "--identity", type=float, default=60.0,
                     help="Identity cutoff percent (default: 60)")
     ap.add_argument("-t", "--threads", type=int, default=4,

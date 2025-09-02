@@ -10,8 +10,8 @@
 THREADS=4
 MODE="PE"
 PLATFORM="illumina"
-BLASTDB_16S="/home/database/dada2_gtdb_ref/arch_bac_nr_16s"
-PRIMER_FILE="/home/chenyanpeng/database/16s_primer.tsv"
+BLASTDB_16S="/mnt/nfs_ME4084storage03/chenyanpeng/database/dada2_gtdb_ref/arch_bac_nr_16s"
+PRIMER_FILE="/mnt/nfs_ME4084storage03/chenyanpeng/database/16s_primer.tsv"
 PARTITION="cn"
 MEM_GB=500G
 WALLTIME="10-00:00:00"
@@ -24,6 +24,7 @@ usage() {
 dd2_pipeline.sh: Process amplicon sequencing data with DADA2.
 
 Steps:
+  0. is 16S amplicon data? 
   1. fastp filtering & QC
   2. Primer detection and trimming (cutadapt)
   3. DADA2 denoising & ASV generation
@@ -98,19 +99,19 @@ while true; do
 done
 
 #─────────────── Validate Input ────────────────
-[[ -z "${INPUT_DIR:-}" ]] && err "ERROR: Missing --input_dir" && usage
-[[ -z "${R1_SUFFIX:-}" ]] && err "ERROR: Missing --r1_suffix" && usage
+[[ -z "${INPUT_DIR:-}" ]] && err "Missing --input_dir" && usage
+[[ -z "${R1_SUFFIX:-}" ]] && err "Missing --r1_suffix" && usage
 input_dir="${INPUT_DIR%/}"
 
-mode=$(echo "$MODE" | tr '[:upper:]' '[:lower:]')
+MODE=$(echo "$MODE" | tr '[:upper:]' '[:lower:]')
 PLATFORM=$(echo "$PLATFORM" | tr '[:upper:]' '[:lower:]')
 
 if [[ "$MODE" != "pe" && "$MODE" != "se" ]]; then
-  err "ERROR: --mode must be SE or PE (case-insensitive)"; usage
+  err "--mode must be SE or PE "; usage
 fi
 
 if [[ "$MODE" == "pe" && -z "${R2_SUFFIX:-}" ]]; then
-  err "ERROR: --r2_suffix is required in PE mode"; usage
+  err "--r2_suffix is required in PE mode"; usage
 fi
 
 if [[ ! -f "$PRIMER_FILE" ]]; then
@@ -144,7 +145,7 @@ fi
 
 #─────────────── Input Check ────────────────
 if [[ ! -d "$input_dir" ]]; then
-  err "ERROR: Input directory not found: $input_dir"
+  err "Input directory not found: $input_dir"
   exit 1
 fi
 
@@ -152,7 +153,7 @@ fi
 log "Step 0: Check if data is 16S amplicon sequencing"
 start_t=$(date +%s)
 find "$input_dir" -type f -name "*$R1_SUFFIX" \
-  | is_16s_amplicon.py --db "${BLASTDB_16S}" \
+  | is_16s_amplicon.py - --db "${BLASTDB_16S}" \
       --nreads 1000 --threads 1 --concurrent "$THREADS" --format tsv \
       --output is_16s.tsv 1>/dev/null 2> is_16s.err
 [[ -s is_16s.tsv ]] || { err "is_16s.tsv not generated or empty"; exit 1; }
@@ -170,19 +171,18 @@ awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv \
           "$input_dir/${a}${r1_suffix:-}" \
           "$input_dir/${a}${r2_suffix:-}"
     done
+if [[ $MODE == "pe" ]]; then
+  fqfiles=$(find "$input_dir" -type f \( -name "*$R1_SUFFIX" -o -name "*$R2_SUFFIX" \))
+else
+  fqfiles=$(find "$input_dir" -type f -name "*$R1_SUFFIX")
+fi
 elapsed $start_t
+[[ -z "$fqfiles" ]] && { err "No matching files found after removing non-16S samples."; exit 0; }
 echo ""
 
 #─────────────── Step 1: FASTQ Statistics ──────
 log "Step 1: FASTQ statistics using seqkit"
 start_t=$(date +%s)
-if [[ $MODE == "pe" ]]; then
-  fqfiles=$(find "$input_dir" -type f \( -name "*$R1_SUFFIX" -o -name "*$R2_SUFFIX" \))
-else
-  fqfiles=$(find "$input_dir" -type f -name "*$R1_SUFFIX")
-fi  
-
-[[ -z "$fqfiles" ]] && { err "No matching files found."; exit 1; }
 
 if [[ -f seqkit.stat.tsv ]]; then
   existing_count=$(($(wc -l < seqkit.stat.tsv) - 1))
@@ -221,7 +221,7 @@ fastp_finished_count=$(wc -l < fastp.rush.finished)
 if (( sample_count != fastp_finished_count )) ; then
   warn "Sample count: $sample_count, fastp finished $fastp_finished_count"
   find 01_fastp -maxdepth 2 -name "*$R1_SUFFIX" -exec basename {} \; | sed "s/$R1_SUFFIX//" | grep -w -v -f - <(echo $sample_list | tr ' ' '\n') | sort -u > fastp.rush.failed.list
-  err "ERROR: fastp failed"
+  err "fastp failed"
   exit 1
 fi
 
@@ -274,7 +274,7 @@ fi
 cutadapt_finished_count=$(wc -l < cutadapt.rush.finished)
 if (( sample_count != cutadapt_finished_count )) ; then
   find 02_cutadapt -maxdepth 2 -name "*$R1_SUFFIX" -exec basename {} \; | sed "s/$R1_SUFFIX//" | grep -w -v -f - <(echo $sample_list | tr ' ' '\n') | sort -u > cutadapt.rush.failed.list
-  err "ERROR: cutadapt failed"
+  err "cutadapt failed"
   exit 1
 fi
 
@@ -284,7 +284,7 @@ else
   summarize_cutadapt.py -d 02_cutadapt/ -m SE -t $THREADS
 fi
 if [ $? -ne 0 ]; then
-  err "ERROR: summarize_cutadapt.py"
+  err "summarize_cutadapt.py"
   exit 1
 fi
 log "--------------------- cutadapt finished. $(elapsed $start_t)"
@@ -317,7 +317,7 @@ EOF
 if [[ "$SLURM" != true ]]; then
   rm -f dada2.slurm.sh
   if ! eval "$dd_cmd" 2>&1 | tee dd2.log; then
-    err "ERROR: dada2.R failed"
+    err "dada2.R failed"
     exit 1
   fi
   log "$(elapsed $start_t)"
@@ -350,7 +350,7 @@ if [[ -f 03_dada2/suggestion.pe2se.note && "$MODE" == "pe" ]]; then
 fi
 
 if [[ ! -f 03_dada2/seqtab.nochim.rds || ! -f 03_dada2/track.summary.tsv ]]; then
-  err "ERROR: dada2 failed"
+  err "dada2 failed"
   exit 1
 fi
 
