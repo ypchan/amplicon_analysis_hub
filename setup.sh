@@ -104,12 +104,11 @@ if [ ! -f "$PRIMER_FILE" ];then
 fi
 sed -i "s|^PRIMER_FILE=.*$|PRIMER_FILE=\"$PRIMER_FILE\"|" scripts/dd2_pipeline.sh
 
-BLASTDB_16S="$INSTALL_HOME/data/arc_bac_16s_blastDB/arch_bac_16s_ref_90.nhr"
-if [[ ! -f "$BLASTDB_16S" ]];then
+BLASTDB_16S="$INSTALL_HOME/data/arc_bac_16s_blastDB/arch_bac_16s_ref_90"
+if [[ ! -f "$BLASTDB_16S.nhr" ]];then
     err "$BLASTDB_16S not found, please check"
 fi
 
-BLASTDB_16S=${BLASTDB_16S%.ndb}
 sed -i "s|^BLASTDB_16S=.*$|BLASTDB_16S=\"$BLASTDB_16S\"|" scripts/dd2_pipeline.sh
 log "Installation completed."
 echo ""
