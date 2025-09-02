@@ -387,10 +387,11 @@ cat se_illumina_jobs | while read a;do echo ${a} && cd ${a} && dd2_pipeline.sh -
 #!/bin/bash
 #SBATCH --job-name=dd2          # job name
 #SBATCH --partition=cn          # parttion name
-#SBATCH --output=%x_%A_%a.log   # stdout log
-#SBATCH --array=1-50%5          # 1000 tasks per 10 at once
-#SBATCH --cpus-per-task=12      # 12 cpu for each task, if 5 tasks run simultaneously, 12 * 5 = 60
-#SBATCH --mem=500G              # 500 GB per task, f 5 tasks run simultaneously, 500 G * 5 = 2.5T
+#SBATCH --output=/dev/null      # stdout log
+#SBATCH --error=/dev/null       # stderr log
+#SBATCH --array=1-24%5          # 1000 tasks per 10 at once
+#SBATCH --cpus-per-task=12      # 12 cpu for each task
+#SBATCH --mem=500G              # 500 GB per task
 #SBATCH --time=10-00:00:00      # 10 days
 
 source /home/software/miniconda3/etc/profile.d/conda.sh
@@ -416,26 +417,26 @@ R1_SUFFIX=""
 R2_SUFFIX=""
 THREADS=12
 
-if [[ "$BASENAME" == *pe_illumina || "$BASENAME" == *pe_bgi ]]; then
+if [[ "$BASENAME" == *pe_illumina* || "$BASENAME" == *pe_bgi* ]]; then
   MODE="PE"
   PLATFORM="illumina"
   R1_SUFFIX="_1.fastq.gz"
   R2_SUFFIX="_2.fastq.gz"
-elif [[ "$BASENAME" == *se_illumina || "BASENAME" == *se_bgi ]]; then
+elif [[ "$BASENAME" == *se_illumina* || "$BASENAME" == *se_bgi* ]]; then
   MODE="SE"
   PLATFORM="illumina"
   R1_SUFFIX=".fastq.gz"
-elif [[ "$BASENAME" == *se_roche454 ]]; then
+elif [[ "$BASENAME" == *se_roche454* ]]; then
   MODE="SE"
   PLATFORM="454"
   R1_SUFFIX=".fastq.gz"
-elif [[ "$BASENAME" == *se_iontorrent ]]; then
+elif [[ "$BASENAME" == *se_iontorrent* ]]; then
   MODE="SE"
   PLATFORM="iontorrent"
   R1_SUFFIX=".fastq.gz"
 else
   echo "ERROR: unknown $BASENAME"
-  echo " only match：*pe_illumina | *pe_bgi | *se_illumina | *se_roche | *se_iontorrent"
+  echo "only match：*pe_illumina* | *pe_bgi* | *se_illumina* | *se_roche | *se_iontorrent*"
   exit 3
 fi
 
@@ -468,6 +469,7 @@ else
     --mode "$MODE" \
     --platform "$PLATFORM"
 fi
+
 ```
 
 

@@ -181,7 +181,12 @@ else
   FQ_FILES=$(find "$INPUT_DIR" -type f -name "*$R1_SUFFIX")
 fi
 elapsed $start_t
-[[ -z "$FQ_FILES" ]] && { err "No matching files found after removing non-16S samples."; exit 0; }
+if [[ -z "$FQ_FILES" ]]; then
+  warn "No matching files found after removing non-16S samples."
+  rm -rf 00_fq 01_fastp 02_cutadapt
+  touch dd2_finished.note
+  exit 0
+fi
 echo ""
 
 #─────────────── Step 1: FASTQ Statistics ──────
