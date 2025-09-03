@@ -7,15 +7,13 @@
 #───────────────────────────────────────────────
 
 #─────────────── Default Parameters ─────────────
+set -Eeuo pipefail
+
 THREADS=4
 MODE="PE"
 PLATFORM="illumina"
 BLASTDB_16S="/mnt/nfs_ME4084storage03/chenyanpeng/database/dada2_gtdb_ref/arch_bac_nr_16s"
 PRIMER_FILE="/mnt/nfs_ME4084storage03/chenyanpeng/database/16s_primer.tsv"
-PARTITION="cn"
-MEM_GB=500G
-WALLTIME="10-00:00:00"
-SLURM=false
 CLASSIFIER=false
 
 #─────────────── Usage Function ────────────────
@@ -42,10 +40,6 @@ Optional:
   -p, --platform  STR         illumina|454|iontorrent (default: illumina)
   --primer_file   FILE        Primer table (default: ${PRIMER_FILE})
   --classifier                Enable taxonomy classification step (pass through to dada2.R)
-  --slurm                     Submit DADA2 via SLURM
-  --partition     NAME        SLURM partition (default: ${PARTITION})
-  --mem           INT         SLURM memory GB (default: ${MEM_GB})
-  --request_time  D-HH:MM:SS  SLURM walltime (default: ${WALLTIME})
   -h, --help                  Show help
 
 Use:
@@ -76,7 +70,7 @@ elapsed() {
 }
 
 #─────────────── Parse Arguments ────────────────
-ARGS=$(getopt -o i:1:2:t:m:p:h -l input_dir:,r1_suffix:,r2_suffix:,threads:,mode:,platform:,primer_file:,slurm,partition:,mem:,request_time:,classifier,help -n "dada2_pipeline.sh" -- "$@") || { err "Try --help for usage."; exit 1; }
+ARGS=$(getopt -o i:1:2:t:m:p:h -l input_dir:,r1_suffix:,r2_suffix:,threads:,mode:,platform:,primer_file:,classifier,help -n "dada2_pipeline.sh" -- "$@") || { err "Try --help for usage."; exit 1; }
 eval set -- "$ARGS"
 while true; do
   case "$1" in
@@ -87,11 +81,7 @@ while true; do
     -m|--mode) MODE="$2"; shift 2;;
     -p|--platform) PLATFORM="$2"; shift 2;;
     --primer_file) PRIMER_FILE="$2"; shift 2;;
-    --slurm) SLURM=true; shift;;
-    --partition) PARTITION="$2"; shift 2;;
     --classifier) CLASSIFIER=true; shift;;
-    --mem) MEM_GB="$2"; shift 2;;
-    --request_time) WALLTIME="$2"; shift 2;;
     -h|--help) usage;;
     --) shift; break;;
     *) err "Internal error: $1"; exit 1;;
@@ -118,13 +108,13 @@ if [[ ! -f "$PRIMER_FILE" ]]; then
   err "not found $PRIMER_FILE"; usage
 fi
 
-if [[ ! -f "$BLASTDB_16S.ndb" ]]; then
+if [[ ! -f "$BLASTDB_16S.nhr" ]]; then
   err "16S DB not found: $BLASTDB_16S"
   exit 1
 fi
 
 # ─────────────── Validate softwares ────────────────
-for c in fastp cutadapt seqkit rush awk sed gzip is_16s_amplicon.py summarize_cutadapt.py dada2.R; do 
+for c in fastp cutadapt seqkit rush awk sed gzip is_16s_amplicon.py summarize_cutadapt.py dada2.R amplicon_reads_lost_check.sh; do 
   require_cmd "$c"
 done
 
@@ -161,7 +151,7 @@ find "$INPUT_DIR" -type f -name "*$R1_SUFFIX" \
 [[ -s is_16s.tsv ]] || { err "is_16s.tsv not generated or empty"; exit 1; }
 
 NON_16S_COUNT=$(awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv | wc -l)
-echo "    non-16s rRAN amplicon sample count: $NON_16S_COUNT"
+echo "    non-16s rRNA amplicon sample count: $NON_16S_COUNT"
 
 # Remove non-16S samples
 awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv \
@@ -176,12 +166,13 @@ awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv \
     done
 
 if [[ $MODE == "pe" ]]; then
-  FQ_FILES=$(find "$INPUT_DIR" -type f \( -name "*$R1_SUFFIX" -o -name "*$R2_SUFFIX" \))
+  mapfile -t FQ_FILES < <(find "$INPUT_DIR" -type f \( -name "*$R1_SUFFIX" -o -name "*$R2_SUFFIX" \))
 else
-  FQ_FILES=$(find "$INPUT_DIR" -type f -name "*$R1_SUFFIX")
+  mapfile -t FQ_FILES < <(find "$INPUT_DIR" -type f -name "*$R1_SUFFIX")
 fi
 elapsed $start_t
-if [[ -z "$FQ_FILES" ]]; then
+
+if (( ${#FQ_FILES[@]} == 0 )); then
   warn "No matching files found after removing non-16S samples."
   rm -rf 00_fq 01_fastp 02_cutadapt
   touch dd2_finished.note
@@ -195,15 +186,15 @@ start_t=$(date +%s)
 
 if [[ -f seqkit.stat.tsv ]]; then
   existing_count=$(($(wc -l < seqkit.stat.tsv) - 1))
-  new_count=$(echo "$FQ_FILES" | wc -l)
+  new_count=${#FQ_FILES[@]}
   if [[ "$existing_count" -eq "$new_count" ]]; then
     log "seqkit.stat.tsv exists and file count matches. Skipping seqkit stats."
   else
     warn "File count changed. Re-running seqkit stats..."
-    seqkit stats -j "$THREADS" $FQ_FILES | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
+    seqkit stats -j "$THREADS" "${FQ_FILES[@]}" | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
   fi
 else
-  seqkit stats -j "$THREADS" $FQ_FILES | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
+  seqkit stats -j "$THREADS" "${FQ_FILES[@]}" | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
 fi
 elapsed $start_t
 echo ""
@@ -214,6 +205,7 @@ start_t=$(date +%s)
 mkdir -p 01_fastp
 sample_list=$(find "$INPUT_DIR" -maxdepth 2 -name "*$R1_SUFFIX" -exec basename {} \; | sed "s/$R1_SUFFIX//")
 
+rm -f fastp.rush.finished
 if [[ "$MODE" == "pe" ]]; then
   echo "$sample_list" | rush -j "$THREADS" -v r1="$R1_SUFFIX",r2="$R2_SUFFIX",input_dir="$INPUT_DIR" \
     --continue --eta --succ-cmd-file fastp.rush.finished \
@@ -268,6 +260,7 @@ f_primers=$(grep '^forward' "$PRIMER_FILE" | while read a b c d; do echo "-g ${b
 r_primers=$(grep '^reverse' "$PRIMER_FILE" | while read a b c d; do echo "-G ${b}=^${c}"; done | xargs)
 fr_primers=$(grep -e '^forward' -e '^reverse' "$PRIMER_FILE" | while read a b c d; do echo "-g ${b}=^${c}"; done | xargs)
 
+rm -f cutadapt.rush.finished
 if [[ "$MODE" == "pe" ]]; then
   cutadapt_opts="$f_primers $r_primers --revcomp -j 1"
   echo "$sample_list" | rush -j "$THREADS" -v r1="$R1_SUFFIX",r2="$R2_SUFFIX",opt="${cutadapt_opts}" \
@@ -305,35 +298,23 @@ start_t=$(date +%s)
 mkdir -p 03_dada2
 dd_cmd="dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode $MODE --reads1_suffix $R1_SUFFIX --threads $THREADS --platform $PLATFORM"
 [[ "$MODE" == "pe" ]] && dd_cmd+=" --reads2_suffix $R2_SUFFIX"
-[[ "$CLASSIFIER" == true ]] && dd_cmd+=" --classifier /mnt/nfs_ME4084storage03/chenyanpeng/database/gtdb_both_ssu_reps_r226.assignTaxonomy.fna"
 
-cat > dada2.slurm.sh <<EOF
-#!/bin/bash
-#SBATCH --job-name=dd2
-#SBATCH --partition=$PARTITION
-#SBATCH --output=%x.log
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=$THREADS
-#SBATCH --mem=$MEM_GB
-#SBATCH --time=$WALLTIME
-
-exec 2>&1
-source /home/software/miniconda3/etc/profile.d/conda.sh
-conda activate dada2
-$dd_cmd
-EOF
-
-if [[ "$SLURM" != true ]]; then
-  rm -f dada2.slurm.sh
-  if ! eval "$dd_cmd" 2>&1 | tee dd2.log; then
-    err "dada2.R failed"
+# classifier
+if [[ "$CLASSIFIER" == true ]]; then
+  CLASSIFIER_REF="$(readlink -f "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")/../data/gtdb_both_ssu_reps_r226.assignTaxonomy.fna")"
+  if [[ ! -f "$CLASSIFIER_REF" ]]; then
+    err "Classifier reference not found: $CLASSIFIER_REF"
     exit 1
   fi
-  log "$(elapsed $start_t)"
-else
-  log "sbatch dada2.slurm.sh"
-  sbatch dada2.slurm.sh
+  dd_cmd+=" --classifier $CLASSIFIER_REF"
 fi
+
+if ! eval "$dd_cmd" 2>&1 | tee dd2.log; then
+  err "dada2.R failed"
+  exit 1
+fi
+log "$(elapsed $start_t)"
+
 
 log "Step 4: check, should PE → SE?"
 if [[ ! -f 03_dada2/track.summary.tsv ]]; then
@@ -355,7 +336,11 @@ fi
 
 if [[ -f 03_dada2/suggestion.pe2se.note && "$MODE" == "pe" ]]; then
   warn "PE → SE suggested, rerunning dada2.R in SE mode"
-  dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode SE --reads1_suffix $R1SUFFIX --threads $THREADS --platform $PLATFORM
+  dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode SE --reads1_suffix $R1_SUFFIX --threads $THREADS --platform $PLATFORM
+  if [[ $? -ne 0 ]]; then
+    err "dada2.R SE mode failed"
+    exit 1
+  fi
 fi
 
 if [[ ! -f 03_dada2/seqtab.nochim.rds || ! -f 03_dada2/track.summary.tsv ]]; then
@@ -368,7 +353,10 @@ echo ""
 
 #─────────────── Cleanup ───────────────────────
 log "Step cleanup: 00_fq 01_fastp 02_cutadapt"
-rm -rf 00_fq 01_fastp 02_cutadapt
+for d in 00_fq 01_fastp 02_cutadapt; do
+  [[ -d "$d" && "$d" != "/" ]] && rm -rf -- "$d"
+done
+
 log "dd2_pipeline finished."
 touch dd2_finished.note
 exit 0

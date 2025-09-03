@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 is_16s_amplicon - 16S amplicon checker with BLAST.
 
