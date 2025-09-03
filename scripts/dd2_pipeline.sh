@@ -335,7 +335,7 @@ else
 fi
 
 if [[ -f 03_dada2/suggestion.pe2se.note && "$MODE" == "pe" ]]; then
-  warn "PE → SE suggested, rerunning dada2.R in SE mode"
+  warn "PE → SE suggested, re-running dada2.R in SE mode"
   dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode SE --reads1_suffix $R1_SUFFIX --threads $THREADS --platform $PLATFORM
   if [[ $? -ne 0 ]]; then
     err "dada2.R SE mode failed"

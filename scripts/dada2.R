@@ -125,7 +125,7 @@ fastqFs      <- list.files(input_dir, pattern = paste0(reads1_suffix, "$"), full
 sample_names <- sub(paste0(reads1_suffix, "$"), "", basename(fastqFs))
 names(fastqFs) <- sample_names
 sample_count <- length(sample_names)
-cat("    Sample count   : ", sample_count, "\n")
+cat("    Sample count    : ", sample_count, "\n")
 cat("==============================================\n")
 
 if (mode == "pe") {

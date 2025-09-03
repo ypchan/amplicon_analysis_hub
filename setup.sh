@@ -96,6 +96,7 @@ else
     bash work.sh
 fi
 cd "$INSTALL_HOME"
+gunzip data/gtdb_both_ssu_reps_r226.assignTaxonomy.fna.gz
 
 # -- set default data paths in dd2_pipeline.sh
 PRIMER_FILE="$INSTALL_HOME/data/16s_primer.tsv"
