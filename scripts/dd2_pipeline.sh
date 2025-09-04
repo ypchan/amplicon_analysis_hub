@@ -93,14 +93,14 @@ done
 [[ -z "${R1_SUFFIX:-}" ]] && err "Missing --r1_suffix" && usage
 input_dir="${INPUT_DIR%/}"
 
-MODE=$(echo "$MODE" | tr '[:upper:]' '[:lower:]')
+MODE=$(echo "$MODE" | tr '[:lower:]' '[:upper:]')
 PLATFORM=$(echo "$PLATFORM" | tr '[:upper:]' '[:lower:]')
 
-if [[ "$MODE" != "pe" && "$MODE" != "se" ]]; then
+if [[ "$MODE" != "PE" && "$MODE" != "SE" ]]; then
   err "--mode must be SE or PE "; usage
 fi
 
-if [[ "$MODE" == "pe" && -z "${R2_SUFFIX:-}" ]]; then
+if [[ "$MODE" == "PE" && -z "${R2_SUFFIX:-}" ]]; then
   err "--r2_suffix is required in PE mode"; usage
 fi
 
@@ -142,37 +142,25 @@ fi
 #─────────────── Step 1: is 16s amplicon data? ──────
 log "Step 0: Check if data is 16S amplicon sequencing"
 start_t=$(date +%s)
-find "$INPUT_DIR" -type f -name "*$R1_SUFFIX" \
-  | is_16s_amplicon.py - --db "$BLASTDB_16S" \
-      --nreads 100 --threads 1 --concurrent "$THREADS" --format tsv \
-      --output is_16s.tsv 1>/dev/null 2> is_16s.err
 
-[[ -s is_16s.err ]] || rm -f is_16s.err
+SAMPLE_COUNT=$(ls $INPUT_DIR/*$R1_SUFFIX 2>/dev/null | wc -l)
+ls $INPUT_DIR/*$R1_SUFFIX | is_16s_amplicon.py - --db "$BLASTDB_16S" --threads 1 --concurrent "$THREADS" --format tsv --output is_16s.tsv &>/dev/null
 [[ -s is_16s.tsv ]] || { err "is_16s.tsv not generated or empty"; exit 1; }
 
 NON_16S_COUNT=$(awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv | wc -l)
-echo "    non-16s rRNA amplicon sample count: $NON_16S_COUNT"
+echo "    sample  count: $SAMPLE_COUNT"
+echo "    non-16s count: $NON_16S_COUNT"
 
 # Remove non-16S samples
-awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv \
-  | sed "s/${R1_SUFFIX}//" \
-  | while read -r a;do \
-      # Remove PE or SE reads
-      rm -f "$INPUT_DIR/${a}_1.fastq.gz" \
-          "$INPUT_DIR/${a}_2.fastq.gz" \
-          "$INPUT_DIR/${a}.fastq.gz" \
-          "$INPUT_DIR/${a}${R1_SUFFIX:-}" \
-          "$INPUT_DIR/${a}${R2_SUFFIX:-}"
-    done
-
-if [[ $MODE == "pe" ]]; then
-  mapfile -t FQ_FILES < <(find "$INPUT_DIR" -type f \( -name "*$R1_SUFFIX" -o -name "*$R2_SUFFIX" \))
-else
-  mapfile -t FQ_FILES < <(find "$INPUT_DIR" -type f -name "*$R1_SUFFIX")
-fi
+awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv | sed "s/${R1_SUFFIX}//" | while read -r a;do 
+  rm -f "$INPUT_DIR/${a}_1.fastq.gz" "$INPUT_DIR/${a}_2.fastq.gz" \
+    "$INPUT_DIR/${a}.fastq.gz" "$INPUT_DIR/${a}${R1_SUFFIX:-}" \
+    "$INPUT_DIR/${a}${R2_SUFFIX:-}"
+done
 elapsed $start_t
 
-if (( ${#FQ_FILES[@]} == 0 )); then
+F_COUNT=$(ls $INPUT_DIR/*$R1_SUFFIX 2>/dev/null | wc -l)
+if (( $F_COUNT == 0 )); then
   warn "No matching files found after removing non-16S samples."
   rm -rf 00_fq 01_fastp 02_cutadapt
   touch dd2_finished.note
@@ -185,23 +173,28 @@ log "Step 1: FASTQ statistics using seqkit"
 start_t=$(date +%s)
 
 if [[ -f seqkit.stat.tsv ]]; then
-  existing_count=$(($(wc -l < seqkit.stat.tsv) - 1))
-  new_count=${#FQ_FILES[@]}
-  if [[ "$existing_count" -eq "$new_count" ]]; then
+  SEQKIT_COUNT=$(($(wc -l < seqkit.stat.tsv) - 1))
+  if [[ "$MODE" == "PE" ]]; then
+    SAMPLE_COUNT=$(ls $INPUT_DIR/*$R1_SUFFIX $INPUT_DIR/*$R2_SUFFIX 2>/dev/null | wc -l)
+  else
+    SAMPLE_COUNT=$(ls $INPUT_DIR/*$R1_SUFFIX 2>/dev/null | wc -l)
+  fi
+
+  if [[ "$SEQKIT_COUNT" -eq "$SAMPLE_COUNT" ]]; then
     log "seqkit.stat.tsv exists and file count matches. Skipping seqkit stats."
   else
     warn "File count changed. Re-running seqkit stats..."
-    if [[ "$MODE" == "pe" ]]; then
-      seqkit stats -j "$THREADS" "${FQ_FILES[@]}" | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
+    if [[ "$MODE" == "PE" ]]; then
+      seqkit stats -j "$THREADS" $INPUT_DIR/*$R1_SUFFIX $INPUT_DIR/*$R2_SUFFIX | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
     else
-      seqkit stats -j "$THREADS" "${FQ_FILES[@]}" | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||" > seqkit.stat.tsv
+      seqkit stats -j "$THREADS" $INPUT_DIR/*$R1_SUFFIX | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||" > seqkit.stat.tsv
     fi  
   fi
 else
-  if [[ "$MODE" == "pe" ]]; then
-    seqkit stats -j "$THREADS" "${FQ_FILES[@]}" | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
+  if [[ "$MODE" == "PE" ]]; then
+    seqkit stats -j "$THREADS" $INPUT_DIR/*$R1_SUFFIX $INPUT_DIR/*$R2_SUFFIX | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
   else
-    seqkit stats -j "$THREADS" "${FQ_FILES[@]}" | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||" > seqkit.stat.tsv
+    seqkit stats -j "$THREADS" $INPUT_DIR/*$R1_SUFFIX | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||" > seqkit.stat.tsv
   fi
 fi
 elapsed $start_t
@@ -211,30 +204,30 @@ echo ""
 log "Step 2: QC using fastp"
 start_t=$(date +%s)
 mkdir -p 01_fastp
-sample_list=$(find "$INPUT_DIR" -maxdepth 2 -name "*$R1_SUFFIX" -exec basename {} \; | sed "s/$R1_SUFFIX//")
+SAMPLE_LIST=$(ls $INPUT_DIR/*$R1_SUFFIX | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||")
 
-if [[ "$MODE" == "pe" ]]; then
-  echo "$sample_list" | rush -j "$THREADS" -v r1="$R1_SUFFIX",r2="$R2_SUFFIX",input_dir="$INPUT_DIR" \
+if [[ "$MODE" == "PE" ]]; then
+  echo "$SAMPLE_LIST" | rush -j "$THREADS" -v r1="$R1_SUFFIX",r2="$R2_SUFFIX",input_dir="$INPUT_DIR" \
     --continue --eta --succ-cmd-file fastp.rush.finished \
     'fastp -i {input_dir}/{1}{r1} -I {input_dir}/{1}{r2} -o 01_fastp/{1}{r1} -O 01_fastp/{1}{r2} --thread 1 --length_required 100 --n_base_limit 0 --cut_tail --qualified_quality_phred 20 --unqualified_percent_limit 20 --html /dev/null --json /dev/null &> 01_fastp/{1}.fastp.log'
 else
-  echo "$sample_list" | rush -j "$THREADS" -v r1="$R1_SUFFIX",input_dir="$INPUT_DIR" \
+  echo "$SAMPLE_LIST" | rush -j "$THREADS" -v r1="$R1_SUFFIX",input_dir="$INPUT_DIR" \
     --continue --eta --succ-cmd-file fastp.rush.finished \
     'fastp -i {input_dir}/{1}{r1} -o 01_fastp/{1}{r1} --thread 1 --length_required 100 --n_base_limit 0 --cut_tail --qualified_quality_phred 20 --unqualified_percent_limit 20 --html /dev/null --json /dev/null &> 01_fastp/{1}.fastp.log'
 fi
 
-sample_count=$(printf '%s\n' $sample_list | sed '/^$/d' | wc -l)
-fastp_finished_count=$(wc -l < fastp.rush.finished)
+SAMPLE_COUNT=$(printf '%s\n' $SAMPLE_LIST | sed '/^$/d' | wc -l)
+FASTP_COUNT=$(wc -l < fastp.rush.finished)
 
-if (( sample_count != fastp_finished_count )) ; then
-  warn "Sample count: $sample_count, fastp finished $fastp_finished_count"
-  find 01_fastp -maxdepth 2 -name "*$R1_SUFFIX" -exec basename {} \; | sed "s/$R1_SUFFIX//" | grep -w -v -f - <(echo $sample_list | tr ' ' '\n') | sort -u > fastp.rush.failed.list
+if [[ $SAMPLE_COUNT -ne $FASTP_COUNT ]]; then
+  warn "Sample count: $SAMPLE_COUNT, fastp finished $FASTP_COUNT"
+  ls 01_fastp/*$R1_SUFFIX | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||" | grep -w -v -f - <(echo $SAMPLE_LIST | tr ' ' '\n') | sort -u > fastp.rush.failed.list
   err "fastp failed"
   exit 1
 fi
 
 # fastp summary
-if [[ "$MODE" == "pe" ]]; then
+if [[ "$MODE" == "PE" ]]; then
   awk_cmd='
     /Read1 before filtering:/ { getline; r1in=$3 }
     /Read2 before filtering:/ { getline; r2in=$3 }
@@ -267,26 +260,26 @@ f_primers=$(grep '^forward' "$PRIMER_FILE" | while read a b c d; do echo "-g ${b
 r_primers=$(grep '^reverse' "$PRIMER_FILE" | while read a b c d; do echo "-G ${b}=^${c}"; done | xargs)
 fr_primers=$(grep -e '^forward' -e '^reverse' "$PRIMER_FILE" | while read a b c d; do echo "-g ${b}=^${c}"; done | xargs)
 
-if [[ "$MODE" == "pe" ]]; then
+if [[ "$MODE" == "PE" ]]; then
   cutadapt_opts="$f_primers $r_primers --revcomp -j 1"
-  echo "$sample_list" | rush -j "$THREADS" -v r1="$R1_SUFFIX",r2="$R2_SUFFIX",opt="${cutadapt_opts}" \
+  echo "$SAMPLE_LIST" | rush -j "$THREADS" -v r1="$R1_SUFFIX",r2="$R2_SUFFIX",opt="${cutadapt_opts}" \
     --continue --eta --succ-cmd-file cutadapt.rush.finished \
     'cutadapt {opt} -o 02_cutadapt/{1}{r1} -p 02_cutadapt/{1}{r2} 01_fastp/{1}{r1} 01_fastp/{1}{r2} &> 02_cutadapt/{1}.cutadapt.log'
 else
   cutadapt_opts="$fr_primers --revcomp -j 1"
-  echo "$sample_list" | rush -j "$THREADS" -v r1="$R1_SUFFIX",opt="${cutadapt_opts}" \
+  echo "$SAMPLE_LIST" | rush -j "$THREADS" -v r1="$R1_SUFFIX",opt="${cutadapt_opts}" \
     --continue --eta --succ-cmd-file cutadapt.rush.finished \
     'cutadapt {opt} -o 02_cutadapt/{1}{r1} 01_fastp/{1}{r1} &> 02_cutadapt/{1}.cutadapt.log'
 fi
 
-cutadapt_finished_count=$(wc -l < cutadapt.rush.finished)
-if (( sample_count != cutadapt_finished_count )) ; then
-  find 02_cutadapt -maxdepth 2 -name "*$R1_SUFFIX" -exec basename {} \; | sed "s/$R1_SUFFIX//" | grep -w -v -f - <(echo $sample_list | tr ' ' '\n') | sort -u > cutadapt.rush.failed.list
+CUTADAPT_COUNT=$(wc -l < cutadapt.rush.finished)
+if [[ $SAMPLE_COUNT -ne $CUTADAPT_COUNT ]]; then
+  ls 02_cutadapt/*$R1_SUFFIX| sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||" | grep -w -v -f - <(echo $SAMPLE_LIST | tr ' ' '\n') | sort -u > cutadapt.rush.failed.list
   err "cutadapt failed"
   exit 1
 fi
 
-if [[ $MODE == "pe" ]]; then
+if [[ $MODE == "PE" ]]; then
   summarize_cutadapt.py -d 02_cutadapt/ -m PE -t $THREADS
 else
   summarize_cutadapt.py -d 02_cutadapt/ -m SE -t $THREADS
@@ -303,11 +296,11 @@ log "Step 4: dada2.R"
 start_t=$(date +%s)
 mkdir -p 03_dada2
 dd_cmd="dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode $MODE --reads1_suffix $R1_SUFFIX --threads $THREADS --platform $PLATFORM"
-[[ "$MODE" == "pe" ]] && dd_cmd+=" --reads2_suffix $R2_SUFFIX"
+[[ "$MODE" == "PE" ]] && dd_cmd+=" --reads2_suffix $R2_SUFFIX"
 
 # classifier
 if [[ "$CLASSIFIER" == true ]]; then
-  CLASSIFIER_REF="$(readlink -f "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")/../data/gtdb_both_ssu_reps_r226.assignTaxonomy.fna")"
+  CLASSIFIER_REF="$(readlink -f "$(dirname -- "$(realpath "${BASH_SOURCE[0]}")")/../data/gtdb_both_ssu_reps_r226.assignTaxonomy.fna")"
   if [[ ! -f "$CLASSIFIER_REF" ]]; then
     err "Classifier reference not found: $CLASSIFIER_REF"
     exit 1
@@ -327,7 +320,7 @@ if [[ ! -f 03_dada2/track.summary.tsv ]]; then
   err "dada2.R error"
   exit 1
 fi
-if [[ $MODE == "pe" ]]; then
+if [[ $MODE == "PE" ]]; then
   amplicon_reads_lost_check.sh -i 03_dada2/track.summary.tsv
 else
   amplicon_reads_lost_check.sh -i 03_dada2/track.summary.tsv &>/dev/null
@@ -340,7 +333,7 @@ else
   exit 1
 fi
 
-if [[ -f 03_dada2/suggestion.pe2se.note && "$MODE" == "pe" ]]; then
+if [[ -f 03_dada2/suggestion.pe2se.note && "$MODE" == "PE" ]]; then
   warn "PE → SE suggested, re-running dada2.R in SE mode"
   dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode SE --reads1_suffix $R1_SUFFIX --threads $THREADS --platform $PLATFORM
   if [[ $? -ne 0 ]]; then
