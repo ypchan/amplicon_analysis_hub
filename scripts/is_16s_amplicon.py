@@ -189,7 +189,7 @@ Examples
     ap.add_argument("inputs", nargs="+", help="FASTQ paths; use '-' to read from stdin (can be mixed)")
     ap.add_argument(
         "-d", "--db",
-        default="/share/cn1_fs/database/dada2_gtdb_ref/arch_bac_nr_16s",
+        default="BLASTn_16s_DB",
         help="BLAST database prefix",
     )
     ap.add_argument("-n", "--nreads", type=int, default=100,
@@ -211,6 +211,12 @@ Examples
     files = gather_inputs(args.inputs)
     if not files:
         sys.exit("No input files.")
+
+    script_dir = Path(__file__).resolve().parent
+    BLASTn_DB = ap.db
+    file_path = Path(BLASTn_DB + ".nhr") 
+    if not file_path.exists():
+        sys.exit(f"BLAST DB not found: {BLASTn_DB}")
 
     # Concurrency: threads_per_job = args.threads (per sample)
     concurrent = max(1, args.concurrent)

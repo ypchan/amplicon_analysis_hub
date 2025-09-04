@@ -111,6 +111,8 @@ if [[ ! -f "$BLASTDB_16S.nhr" ]];then
 fi
 
 sed -i "s|^BLASTDB_16S=.*$|BLASTDB_16S=\"$BLASTDB_16S\"|" scripts/dd2_pipeline.sh
+sed -i "s|default=\"BLASTn_16s_DB\"|default=\"$BLASTDB_16S\"|" scripts/is_16s_amplicon.py
+
 log "Installation completed."
 echo ""
 log "Take a quick look"

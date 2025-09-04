@@ -191,10 +191,18 @@ if [[ -f seqkit.stat.tsv ]]; then
     log "seqkit.stat.tsv exists and file count matches. Skipping seqkit stats."
   else
     warn "File count changed. Re-running seqkit stats..."
-    seqkit stats -j "$THREADS" "${FQ_FILES[@]}" | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
+    if [[ "$MODE" == "pe" ]]; then
+      seqkit stats -j "$THREADS" "${FQ_FILES[@]}" | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
+    else
+      seqkit stats -j "$THREADS" "${FQ_FILES[@]}" | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||" > seqkit.stat.tsv
+    fi  
   fi
 else
-  seqkit stats -j "$THREADS" "${FQ_FILES[@]}" | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
+  if [[ "$MODE" == "pe" ]]; then
+    seqkit stats -j "$THREADS" "${FQ_FILES[@]}" | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||;s|$R2_SUFFIX||" > seqkit.stat.tsv
+  else
+    seqkit stats -j "$THREADS" "${FQ_FILES[@]}" | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||" > seqkit.stat.tsv
+  fi
 fi
 elapsed $start_t
 echo ""
@@ -205,7 +213,6 @@ start_t=$(date +%s)
 mkdir -p 01_fastp
 sample_list=$(find "$INPUT_DIR" -maxdepth 2 -name "*$R1_SUFFIX" -exec basename {} \; | sed "s/$R1_SUFFIX//")
 
-rm -f fastp.rush.finished
 if [[ "$MODE" == "pe" ]]; then
   echo "$sample_list" | rush -j "$THREADS" -v r1="$R1_SUFFIX",r2="$R2_SUFFIX",input_dir="$INPUT_DIR" \
     --continue --eta --succ-cmd-file fastp.rush.finished \
@@ -260,7 +267,6 @@ f_primers=$(grep '^forward' "$PRIMER_FILE" | while read a b c d; do echo "-g ${b
 r_primers=$(grep '^reverse' "$PRIMER_FILE" | while read a b c d; do echo "-G ${b}=^${c}"; done | xargs)
 fr_primers=$(grep -e '^forward' -e '^reverse' "$PRIMER_FILE" | while read a b c d; do echo "-g ${b}=^${c}"; done | xargs)
 
-rm -f cutadapt.rush.finished
 if [[ "$MODE" == "pe" ]]; then
   cutadapt_opts="$f_primers $r_primers --revcomp -j 1"
   echo "$sample_list" | rush -j "$THREADS" -v r1="$R1_SUFFIX",r2="$R2_SUFFIX",opt="${cutadapt_opts}" \
