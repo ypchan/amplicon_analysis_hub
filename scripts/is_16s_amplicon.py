@@ -213,7 +213,7 @@ Examples
         sys.exit("No input files.")
 
     script_dir = Path(__file__).resolve().parent
-    BLASTn_DB = ap.db
+    BLASTn_DB = args.db
     file_path = Path(BLASTn_DB + ".nhr") 
     if not file_path.exists():
         sys.exit(f"BLAST DB not found: {BLASTn_DB}")
