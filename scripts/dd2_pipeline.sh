@@ -12,8 +12,8 @@ set -Eeuo pipefail
 THREADS=4
 MODE="PE"
 PLATFORM="illumina"
-BLASTDB_16S="/mnt/nfs_ME4084storage03/chenyanpeng/database/dada2_gtdb_ref/arch_bac_nr_16s"
-PRIMER_FILE="/mnt/nfs_ME4084storage03/chenyanpeng/database/16s_primer.tsv"
+BLASTDB_16S="$(realpath -f "$(dirname -- "$(realpath "${BASH_SOURCE[0]}")")/../data/arc_bac_16s_blastDB/arch_bac_16s_ref_90")"
+PRIMER_FILE="$(realpath -f "$(dirname -- "$(realpath "${BASH_SOURCE[0]}")")/../data/16s_primer.tsv")"
 CLASSIFIER=false
 
 #─────────────── Usage Function ────────────────
@@ -66,7 +66,7 @@ require_cmd() { command -v "$1" >/dev/null 2>&1 || { err "Missing software: $1";
 
 elapsed() {
   local s=$1; local e=$(date +%s)
-  printf "Elapsed time: %02d:%02d:%02d\n" $(( (e-s)/3600 )) $(( ((e-s)%3600)/60 )) $(( (e-s)%60 ))
+  printf "    Elapsed time: %02d:%02d:%02d\n" $(( (e-s)/3600 )) $(( ((e-s)%3600)/60 )) $(( (e-s)%60 ))
 }
 
 #─────────────── Parse Arguments ────────────────
@@ -157,15 +157,15 @@ awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv | sed "s/${R1_SUFFIX}//" | while re
     "$INPUT_DIR/${a}.fastq.gz" "$INPUT_DIR/${a}${R1_SUFFIX:-}" \
     "$INPUT_DIR/${a}${R2_SUFFIX:-}"
 done
-elapsed $start_t
 
-F_COUNT=$(ls $INPUT_DIR/*$R1_SUFFIX 2>/dev/null | wc -l)
-if (( $F_COUNT == 0 )); then
+if [[  $SAMPLE_COUNT -eq $NON_16S_COUNT ]]; then
   warn "No matching files found after removing non-16S samples."
   rm -rf 00_fq 01_fastp 02_cutadapt
   touch dd2_finished.note
   exit 0
 fi
+
+elapsed $start_t
 echo ""
 
 #─────────────── Step 1: FASTQ Statistics ──────
@@ -313,34 +313,6 @@ if ! eval "$dd_cmd" 2>&1 | tee dd2.log; then
   exit 1
 fi
 log "$(elapsed $start_t)"
-
-
-log "Step 4: check, should PE → SE?"
-if [[ ! -f 03_dada2/track.summary.tsv ]]; then
-  err "dada2.R error"
-  exit 1
-fi
-if [[ $MODE == "PE" ]]; then
-  amplicon_reads_lost_check.sh -i 03_dada2/track.summary.tsv
-else
-  amplicon_reads_lost_check.sh -i 03_dada2/track.summary.tsv &>/dev/null
-fi
-
-if [[ -f 03_dada2/reads_lost_ratio.summary.tsv ]]; then
-  log "amplicon_reads_lost_check.sh finished"
-else
-  err "amplicon_reads_lost_check.sh error"
-  exit 1
-fi
-
-if [[ -f 03_dada2/suggestion.pe2se.note && "$MODE" == "PE" ]]; then
-  warn "PE → SE suggested, re-running dada2.R in SE mode"
-  dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode SE --reads1_suffix $R1_SUFFIX --threads $THREADS --platform $PLATFORM
-  if [[ $? -ne 0 ]]; then
-    err "dada2.R SE mode failed"
-    exit 1
-  fi
-fi
 
 if [[ ! -f 03_dada2/seqtab.nochim.rds || ! -f 03_dada2/track.summary.tsv ]]; then
   err "dada2 failed"

@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Tuple
 
 HEADER = ["sample_id", "bac_hits", "arch_hits", "total_hits", "total_percent", "is_16S"]
-
+BLASTn_16s_DB = Path(__file__).resolve().parent / "data" / "arc_bac_16s_blastDB" / "arch_bac_16s_ref_90"
 
 # ------------ Single-sample BLAST pipeline runner ------------
 def run_blast_stream(
@@ -189,8 +189,8 @@ Examples
     ap.add_argument("inputs", nargs="+", help="FASTQ paths; use '-' to read from stdin (can be mixed)")
     ap.add_argument(
         "-d", "--db",
-        default="BLASTn_16s_DB",
-        help="BLAST database prefix",
+        default=BLASTn_16s_DB,
+        help=f"BLAST database prefix, {BLASTn_16s_DB}",
     )
     ap.add_argument("-n", "--nreads", type=int, default=100,
                     help="Number of reads to sample per file (default: 100)")
