@@ -156,8 +156,8 @@ printf '%s\n' "${R1_FILE[@]}" \
 
 NON_16S_COUNT=$(awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv | wc -l)
 echo "------------------------------------------"
-echo "|    sample  count: $SAMPLE_COUNT        |"
-echo "|    non-16s count: $NON_16S_COUNT       |"
+printf "|    sample  count: %-5s        |\n" "$SAMPLE_COUNT"
+printf "|    non-16s count: %-5s        |\n" "$NON_16S_COUNT"
 echo "-----------------------------------------|"
 
 # Remove non-16S samples
