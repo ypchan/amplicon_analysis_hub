@@ -12,8 +12,8 @@ set -Eeuo pipefail
 THREADS=4
 MODE="PE"
 PLATFORM="illumina"
-BLASTDB_16S="$(realpath -f "$(dirname -- "$(realpath "${BASH_SOURCE[0]}")")/../data/arc_bac_16s_blastDB/arch_bac_16s_ref_90")"
-PRIMER_FILE="$(realpath -f "$(dirname -- "$(realpath "${BASH_SOURCE[0]}")")/../data/16s_primer.tsv")"
+BLASTDB_16S="$(realpath "$(dirname -- "$(realpath "${BASH_SOURCE[0]}")")/../data/arc_bac_16s_blastDB/arch_bac_16s_ref_90")"
+PRIMER_FILE="$(realpath "$(dirname -- "$(realpath "${BASH_SOURCE[0]}")")/../data/16s_primer.tsv")"
 CLASSIFIER=false
 
 #─────────────── Usage Function ────────────────
@@ -114,7 +114,7 @@ if [[ ! -f "$BLASTDB_16S.nhr" ]]; then
 fi
 
 # ─────────────── Validate softwares ────────────────
-for c in fastp cutadapt seqkit rush awk sed gzip is_16s_amplicon.py summarize_cutadapt.py dada2.R amplicon_reads_lost_check.sh; do 
+for c in fastp cutadapt seqkit rush awk sed gzip is_16s_amplicon.py summarize_cutadapt.py dada2.R; do 
   require_cmd "$c"
 done
 
@@ -139,28 +139,35 @@ if [[ ! -d "$INPUT_DIR" ]]; then
   exit 1
 fi
 
-#─────────────── Step 1: is 16s amplicon data? ──────
-log "Step 0: Check if data is 16S amplicon sequencing"
+#─────────────── STEP 0: is 16s amplicon data? ──────
+log "STEP 0: Is 16S amplicon sequencing"
 start_t=$(date +%s)
 
-SAMPLE_COUNT=$(ls $INPUT_DIR/*$R1_SUFFIX 2>/dev/null | wc -l)
-ls $INPUT_DIR/*$R1_SUFFIX | is_16s_amplicon.py - --db "$BLASTDB_16S" --threads 1 --concurrent "$THREADS" --format tsv --output is_16s.tsv &>/dev/null
+R1_FILE=( "$INPUT_DIR"/*"$R1_SUFFIX" )
+SAMPLE_COUNT=${#R1_FILE[@]}
+
+: > is_16s.tsv
+printf '%s\n' "${R1_FILE[@]}" \
+  | is_16s_amplicon.py - --db "$BLASTDB_16S" --threads 1 \
+      --concurrent "$THREADS" --format tsv --output is_16s.tsv \
+  >/dev/null 2>&1
+
 [[ -s is_16s.tsv ]] || { err "is_16s.tsv not generated or empty"; exit 1; }
 
 NON_16S_COUNT=$(awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv | wc -l)
-echo "    sample  count: $SAMPLE_COUNT"
-echo "    non-16s count: $NON_16S_COUNT"
+echo "------------------------------------------"
+echo "|    sample  count: $SAMPLE_COUNT        |"
+echo "|    non-16s count: $NON_16S_COUNT       |"
+echo "-----------------------------------------|"
 
 # Remove non-16S samples
 awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv | sed "s/${R1_SUFFIX}//" | while read -r a;do 
-  rm -f "$INPUT_DIR/${a}_1.fastq.gz" "$INPUT_DIR/${a}_2.fastq.gz" \
-    "$INPUT_DIR/${a}.fastq.gz" "$INPUT_DIR/${a}${R1_SUFFIX:-}" \
-    "$INPUT_DIR/${a}${R2_SUFFIX:-}"
+  rm -f "$INPUT_DIR/${a}${R1_SUFFIX}" "$INPUT_DIR/${a}${R2_SUFFIX}" 
 done
 
-if [[  $SAMPLE_COUNT -eq $NON_16S_COUNT ]]; then
+if (( SAMPLE_COUNT == NON_16S_COUNT )); then
   warn "No matching files found after removing non-16S samples."
-  rm -rf 00_fq 01_fastp 02_cutadapt
+  rm -rf -- 00_fq 01_fastp 02_cutadapt
   touch dd2_finished.note
   exit 0
 fi
@@ -168,8 +175,8 @@ fi
 elapsed $start_t
 echo ""
 
-#─────────────── Step 1: FASTQ Statistics ──────
-log "Step 1: FASTQ statistics using seqkit"
+#─────────────── STEP 1: FASTQ Statistics ──────
+log "STEP 1: FASTQ statistics using seqkit"
 start_t=$(date +%s)
 
 if [[ -f seqkit.stat.tsv ]]; then
@@ -180,7 +187,7 @@ if [[ -f seqkit.stat.tsv ]]; then
     SAMPLE_COUNT=$(ls $INPUT_DIR/*$R1_SUFFIX 2>/dev/null | wc -l)
   fi
 
-  if [[ "$SEQKIT_COUNT" -eq "$SAMPLE_COUNT" ]]; then
+  if (( "$SEQKIT_COUNT" == "$SAMPLE_COUNT" )) ; then
     log "seqkit.stat.tsv exists and file count matches. Skipping seqkit stats."
   else
     warn "File count changed. Re-running seqkit stats..."
@@ -200,8 +207,8 @@ fi
 elapsed $start_t
 echo ""
 
-#─────────────── Step 2: fastp QC ──────────────
-log "Step 2: QC using fastp"
+#─────────────── STEP 2: fastp QC ──────────────
+log "STEP 2: QC using fastp"
 start_t=$(date +%s)
 mkdir -p 01_fastp
 SAMPLE_LIST=$(ls $INPUT_DIR/*$R1_SUFFIX | sed "s|$INPUT_DIR/||;s|$R1_SUFFIX||")
@@ -251,8 +258,8 @@ log "fastp summary -> fastp.filter.tsv"
 log "--------------------- fastp finished. $(elapsed $start_t)"
 echo ""
 
-#─────────────── Step 3: cutadapt ──────────────
-log "Step 3: cutadapt primer trimming"
+#─────────────── STEP 3: cutadapt ──────────────
+log "STEP 3: cutadapt primer trimming"
 start_t=$(date +%s)
 mkdir -p 02_cutadapt
 
@@ -291,8 +298,8 @@ fi
 log "--------------------- cutadapt finished. $(elapsed $start_t)"
 echo ""
 
-#─────────────── Step 4: DADA2 ────────────────
-log "Step 4: dada2.R"
+#─────────────── STEP 4: DADA2 ────────────────
+log "STEP 4: dada2.R"
 start_t=$(date +%s)
 mkdir -p 03_dada2
 dd_cmd="dada2.R -i 02_cutadapt --output_dir 03_dada2 --mode $MODE --reads1_suffix $R1_SUFFIX --threads $THREADS --platform $PLATFORM"
@@ -323,7 +330,7 @@ log "--------------------- dada2 finished. $(elapsed $start_t)"
 echo ""
 
 #─────────────── Cleanup ───────────────────────
-log "Step cleanup: 00_fq 01_fastp 02_cutadapt"
+log "STEP cleanup: 00_fq 01_fastp 02_cutadapt"
 for d in 00_fq 01_fastp 02_cutadapt; do
   [[ -d "$d" && "$d" != "/" ]] && rm -rf -- "$d"
 done
