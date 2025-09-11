@@ -162,7 +162,7 @@ echo "-----------------------------------------|"
 
 # Remove non-16S samples
 awk -F '\t' '$6=="NO" {print $1}' is_16s.tsv | sed "s/${R1_SUFFIX}//" | while read -r a;do 
-  rm "$INPUT_DIR/${a}${R1_SUFFIX}" "$INPUT_DIR/${a}${R2_SUFFIX}" 
+  rm -f -- "$INPUT_DIR/${a}${R1_SUFFIX}" "$INPUT_DIR/${a}${R2_SUFFIX}" 
 done
 
 if (( SAMPLE_COUNT == NON_16S_COUNT )); then

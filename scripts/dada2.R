@@ -40,6 +40,8 @@ Options:
   -t, --threads         Number of threads (default: 4)
   -P, --platform        Platform: illumina, 454, or iontorrent (default: illumina)
   -c, --classifier      Path to taxonomy classifier FASTA
+  -f, --truncLengthf    Truncate forward reads at this length (default: 0, no truncation)
+  -r, --truncLengthr    Truncate reverse reads at this length (PE only; default: 0, no truncation)
   -h, --help            Show this help and exit
 
 Output (in <output_dir>):
@@ -47,6 +49,11 @@ Output (in <output_dir>):
   seqtab.nochim.rds     Non-chimera ASV table (RDS)
   track.summary.tsv     Read counts at each step
   taxonomy.tsv          Taxonomy assignment (if -c given)
+
+Examples:
+  dada2.R -i 02_cutadapt -o 03_dada2 -m pe -t 8 -1 _1.fastq.gz -2 _2.fastq.gz -P illumina
+  # for some bioprojects, error, truncLengthf/r may need to be set, reference seqkit.stat.tsv, set -f 200 -r 160
+  dada2.R -i 02_cutadapt -o 03_dada2 -m pe -t 8 -1 _1.fastq.gz -2 _2.fastq.gz -P illumina -f 200 -r 160 
 \n")
 }
 
@@ -59,6 +66,8 @@ spec <- matrix(c(
   'threads',       't', 1, "integer",    'CPU threads (default: 4)',
   'platform',      'P', 1, "character",  'Sequencing platform: illumina|454|iontorrent (default: illumina)',
   'classifier',    'c', 1, "character",  'Classifier FASTA for taxonomy',
+  'truncLengthf',  'f', 1, "integer",    'Truncate reads after truncLen bases. Reads shorter than this are discarded',
+  'truncLengthr',  'r', 1, "integer",    'Truncate reads after truncLen bases. Reads shorter than this are discarded (PE only)',
   'help',          'h', 0, "logical",    'Show help and exit'
 ), byrow = TRUE, ncol = 5)
 
@@ -74,6 +83,8 @@ if (!is.null(opt$help) || is.null(opt$input_dir) || is.null(opt$output_dir) || i
 threads        <- ifelse(is.null(opt$threads), 4, opt$threads)
 reads1_suffix  <- ifelse(is.null(opt$reads1_suffix), "_1.fastq.gz", opt$reads1_suffix)
 reads2_suffix  <- ifelse(is.null(opt$reads2_suffix), "_2.fastq.gz", opt$reads2_suffix)
+truncLengthf   <- ifelse(is.null(opt$truncLengthf), 0, opt$truncLengthf)
+truncLengthr   <- ifelse(is.null(opt$truncLengthr), 0, opt$truncLengthr)
 platform       <- tolower(ifelse(is.null(opt$platform), "illumina", opt$platform))
 if (!platform %in% c("illumina", "454", "iontorrent")) stop("Unsupported platform: ", platform)
 
@@ -214,7 +225,8 @@ filter_and_trim_se <- function(fastqFs, filtFs, platform, threads,
                                failed_sample_lst) {
   params <- list(
     maxN = 0, maxEE = 1, truncQ = 11, rm.phix = TRUE, minLen = 100,
-    compress = FALSE, multithread = threads, verbose = TRUE, n = 1e8
+    compress = FALSE, multithread = threads, verbose = TRUE, n = 1e+08,
+    truncLen = truncLengthf
   )
   if (platform == "iontorrent") {
     filter_out <- do.call(filterAndTrim, c(list(fwd = fastqFs, filt = filtFs), params, list(trimLeft = 15)))
@@ -243,7 +255,8 @@ filter_and_trim_pe <- function(fastqFs, fastqRs, filtFs, filtRs, threads,
     fwd = fastqFs, filt = filtFs,
     rev = fastqRs, filt.rev = filtRs,
     maxEE = 2, truncQ = 11, maxN = 0, rm.phix = TRUE,
-    compress = FALSE, verbose = TRUE, multithread = threads, n = 1e8
+    compress = FALSE, verbose = TRUE, multithread = threads, n = 1e+08,
+    truncLen=c(truncLengthf, truncLengthr)
   )
 
   # Drop samples with zero reads after filtering
@@ -267,7 +280,7 @@ filter_and_trim_pe <- function(fastqFs, fastqRs, filtFs, filtRs, threads,
 # -------------------------------
 # Error learning
 # -------------------------------
-learn_err_safe <- function(files, threads, nbases = 1e8) {
+learn_err_safe <- function(files, threads, nbases = 1e+08) {
   if (length(files) == 0) stop("No reads passed the filter.")
   learnErrors(files, multithread = threads, randomize = TRUE, nbases = nbases)
 }
