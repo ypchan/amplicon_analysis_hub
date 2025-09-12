@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Tuple
 
 HEADER = ["sample_id", "bac_hits", "arch_hits", "total_hits", "total_percent", "is_16S"]
-BLASTn_16s_DB = Path(__file__).resolve().parent / "data" / "arc_bac_16s_blastDB" / "arch_bac_16s_ref_90"
+BLASTn_16s_DB = Path(__file__).resolve().parent.parent / "data" / "arc_bac_16s_blastDB" / "arch_bac_16s_ref_90"
 
 # ------------ Single-sample BLAST pipeline runner ------------
 def run_blast_stream(
@@ -123,8 +123,8 @@ def run_blast_stream(
             raise RuntimeError(f"Subprocess failed: {proc.args} (rc={proc.returncode})")
 
     total_hits = len(hits)
-    bac_hits = sum(1 for sid in hits.values() if str(sid).startswith("bacteria__"))
-    arch_hits = sum(1 for sid in hits.values() if str(sid).startswith("archaea__"))
+    bac_hits = sum(1 for sid in hits.values() if str(sid).startswith("bacteria_"))
+    arch_hits = sum(1 for sid in hits.values() if str(sid).startswith("archaea_"))
     percent_hits = 100.0 * total_hits / max(1, nreads)
     is_amplicon = "YES" if percent_hits >= 50.0 else "NO"
 
