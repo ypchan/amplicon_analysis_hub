@@ -148,7 +148,7 @@ SAMPLE_COUNT=${#R1_FILE[@]}
 
 : > is_16s.tsv
 printf '%s\n' "${R1_FILE[@]}" \
-  | is_16s_amplicon.py - --db "$BLASTDB_16S" --threads 1 \
+  | is_16s_amplicon.py - --db "$BLASTDB_16S" --threads 1 --nreads 1000 \
       --concurrent "$THREADS" --format tsv --output is_16s.tsv \
   >/dev/null 2>&1
 

@@ -51,9 +51,11 @@ Output (in <output_dir>):
   taxonomy.tsv          Taxonomy assignment (if -c given)
 
 Examples:
-  dada2.R -i 02_cutadapt -o 03_dada2 -m pe -t 8 -1 _1.fastq.gz -2 _2.fastq.gz -P illumina
+  dada2.R -i 02_cutadapt -o 03_dada2 -m pe -t 24 -1 _1.fastq.gz -2 _2.fastq.gz -P illumina
+  dada2.R -i 02_cutadapt -o 03_dada2 -m se -t 24 -1 .fastq.gz -P illumina
   # for some bioprojects, error, truncLengthf/r may need to be set, reference seqkit.stat.tsv, set -f 200 -r 160
-  dada2.R -i 02_cutadapt -o 03_dada2 -m pe -t 8 -1 _1.fastq.gz -2 _2.fastq.gz -P illumina -f 200 -r 160 
+  dada2.R -i 02_cutadapt -o 03_dada2 -m pe -t 24 -1 _1.fastq.gz -2 _2.fastq.gz -P illumina -f 200 -r 160
+  dada2.R -i 02_cutadapt -o 03_dada2 -m se -t 24 -1 .fastq.gz -P illumina -f 200
 \n")
 }
 
@@ -326,7 +328,7 @@ denoise_merge_pe <- function(filtFs, filtRs, sample_names, errF, errR, threads) 
     ddF    <- dada(derepF, err = errF, multithread = threads)
     derepR <- derepFastq(filtRs[[sam]], 1e+08)
     ddR    <- dada(derepR, err = errR, multithread = threads)
-    mergers[[sam]] <- mergePairs(ddF, derepF, ddR, derepR)
+    mergers[[sam]] <- mergePairs(ddF, derepF, ddR, derepR, verbose=TRUE)
     denoisedF_counts[sam] <- sum(getUniques(ddF))
     denoisedR_counts[sam] <- sum(getUniques(ddR))
     cat("    Elapsed:", elapsed_time(t0), "\n")
@@ -466,7 +468,7 @@ if (mode == "se") {
     cat("    Elapsed time: ", elapsed_time(t), "\n")
 
     track <- build_track_se(filter_out, ddFs, seqtab.nochim, names(filtFs))
-  } 
+  }
 }
 
 # -------------------------------
