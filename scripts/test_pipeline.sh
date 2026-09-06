@@ -1,14 +1,31 @@
-# test is_16s_amplicon.py
-ls 00_fq/*_1.fastq.gz | is_16s_amplicon.py - --threads 4 --concurrent 3 --nreads 100 --out-format tsv --output is_16s.tsv
+#!/usr/bin/env bash
 
-# seqkit
-seqkit stats -j 20 00_fq/*.gz > seqkit.stats.tsv
+# Fast, data-free syntax and CLI smoke tests for amplicon_analysis_hub.
 
-# fastp
-mkdir -p 01_fastp
-ls 00_fq/ | sed 's/_1.fastq.gz//;s/_2.fastq.gz//' | sort -u | rush -j 20 --eta 'fastp -i 00_fq/{1}_1.fastq.gz -I 00_fq/{1}_2.fastq.gz -o 01_fastp/{1}_1.fastq.gz -O 01_fastp/{1}_2.fastq.gz --thread 1 --length_required 100 --n_base_limit 0 --cut_tail --qualified_quality_phred 20 --unqualified_percent_limit 20 --html /dev/null --json /dev/null &> 01_fastp/{1}.fastp.log'
+set -Eeuo pipefail
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+root_dir="$(cd -- "$script_dir/.." && pwd -P)"
 
-# cutadapt
-mkdir -p 02_cutadapt
-PRIMER_FILE=
-ls 01_fastp/ | sed 's/_1.fastq.gz//;s/_2.fastq.gz//' | sort -u | rush -j 20 --eta 'cutadapt -g ^CCTACGGGNGGCWGCAG...AGAGTTTGATCMTGGCTCAG -G ^GACTACHVGGGTATCTAATCC...TACGGYTACCTTGTTACGACT -o 02_cutadapt/{1}_1.fastq.gz -p 02_cutadapt/{1}_2.fastq.gz 01_fastp/{1}_1.fastq.gz 01_fastp/{1}_2.fastq.gz --discard-untrimmed --minimum-length 100 --max-n 0 --quality-cutoff 20 --trim-n --cores=0 &> 02_cutadapt/{1}.cutadapt.log'
+for script in "$root_dir/setup.sh" "$script_dir"/*.sh; do
+  bash -n "$script"
+done
+python3 -m compileall -q "$script_dir"
+for script in "$script_dir"/*.R; do
+  Rscript -e 'parse(file=commandArgs(TRUE)[1])' "$script" >/dev/null
+done
+
+bash "$script_dir/amplicon_pipeline.sh" --help >/dev/null
+python3 "$script_dir/is_16s_amplicon.py" --help >/dev/null
+python3 "$script_dir/fastq_dispatcher.py" --help >/dev/null
+python3 "$script_dir/get_ena_fq_url_by_sra.py" --help >/dev/null
+python3 "$script_dir/summarize_cutadapt.py" --help >/dev/null
+python3 "$script_dir/unify_fq_suffix.py" --help >/dev/null
+python3 "$script_dir/ontology_train_cv.py" --help >/dev/null
+python3 "$script_dir/ontology_infer.py" --help >/dev/null
+Rscript "$script_dir/dada2.R" --help >/dev/null
+Rscript "$script_dir/dada2.R" -M its -P pacbio_ccs -m se --print_profile >/dev/null
+Rscript "$script_dir/asv_annotator.R" --help >/dev/null
+Rscript "$script_dir/count_abundance.R" --help >/dev/null
+Rscript "$script_dir/infer_16s_regions.R" --help >/dev/null
+
+printf 'All syntax and CLI smoke tests passed.\n'

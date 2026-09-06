@@ -1,0 +1,11 @@
+# Common fungal ITS primers. Columns: direction, name, IUPAC sequence, target.
+# Select a smaller study-specific file whenever the actual library primers are known.
+forward	ITS1F	CTTGGTCATTTAGAGGAAGTAA	ITS1
+forward	ITS1	TCCGTAGGTGAACCTGCGG	ITS1
+forward	ITS5	GGAAGTAAAAGTCGTAACAAGG	ITS1
+forward	ITS3	GCATCGATGAAGAACGCAGC	ITS2
+forward	gITS7	GTGARTCATCGARTCTTTG	ITS2
+forward	ITS86F	GTGAATCATCGAATCTTTGAA	ITS2
+reverse	ITS2	GCTGCGTTCTTCATCGATGC	ITS1
+reverse	ITS4	TCCTCCGCTTATTGATATGC	ITS2
+reverse	ITS4ngs	TCCTSCGCTTATTGATATGC	ITS2

@@ -1,119 +1,128 @@
-# gh repo clone ypchan/5M16S #not public yet
-# if failed, download this repo manually and place it in the INSTALL_DIR
-# cd 5M16S || exit 1
+#!/usr/bin/env bash
 
-# colorful output log
-if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" ]]; then
-  C0=$'\033[0m'; Cg=$'\033[1;32m'; Cy=$'\033[1;33m'; Cr=$'\033[1;31m'; Cb=$'\033[1;34m'
-else
-  C0=""; Cg=""; Cy=""; Cr=""; Cb=""
-fi
-ts(){ date '+[%F %T]'; }
-log(){  printf '%s [%sINFO%s] %s\n'  "$(ts)" "$Cb" "$C0" "$*"; }
-ok(){   printf '%s [ %sOK%s ] %s\n'   "$(ts)" "$Cg" "$C0" "$*"; }
-err(){  printf '%s [%sERR%s ] %s\n'  "$(ts)" "$Cr" "$C0" "$*" >&2;exit 1; }
+# Install amplicon_analysis_hub command symlinks and validate dependencies.
+# Source files are never rewritten with machine-specific absolute paths.
 
+set -Eeuo pipefail
 
-INSTALL_HOME=$(realpath .)
-log "Installing to $INSTALL_HOME"
-# ------ biosoftwares dependency
-REQUIREMENTS=("python3" "Rscript" "blastn" "makeblastdb" \
-            "cd-hit" "fastp" "seqkit" "cutadapt" "rush" "dos2unix")
+VERSION="2.0.0"
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+PREFIX="${HOME}/.local/bin"
+CHECK_ONLY=false
+BUILD_16S_DB=false
 
-for cmd in "${REQUIREMENTS[@]}"; do
-    command -v "$cmd" &>/dev/null
-    if [[ $? -ne 0 ]]; then
-        err "$cmd is required, but it's not installed"
-    else
-        ok "$cmd ok"
-    fi
+usage() {
+  cat <<'EOF'
+Usage: bash setup.sh [options]
+
+Options:
+  --prefix DIR       Command symlink directory (default: ~/.local/bin)
+  --check-only       Validate dependencies without installing symlinks
+  --build-16s-db     Download RefSeq 16S loci and build the optional BLAST DB
+  -h, --help         Show this help
+  -V, --version      Show version
+
+Core dependencies:
+  bash >=4.3, Python >=3.9, R, DADA2, getopt (R), fastp, Cutadapt >=4.1,
+  seqkit, and standard POSIX/GNU utilities (including cmp, cksum, and realpath).
+
+Optional dependencies:
+  BLAST+ and cd-hit-est for the 16S content screen/database build; vsearch and
+  tidyverse packages for region/abundance helpers; scikit-learn,
+  sentence-transformers, pandas, pyarrow and joblib for ontology helpers.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --prefix) [[ $# -ge 2 ]] || { echo "--prefix requires a value" >&2; exit 2; }; PREFIX="$2"; shift 2 ;;
+    --check-only) CHECK_ONLY=true; shift ;;
+    --build-16s-db) BUILD_16S_DB=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -V|--version) printf 'setup.sh %s\n' "$VERSION"; exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+  esac
 done
 
-if [[ ! $(cutadapt --version) == "5.1" ]];then
-    err "cutadapt version 5.1 is required, but found $(cutadapt --version), please install cutadapt v5.1"
-else
-    ok "cutadapt ok"  
-fi
+log() { printf '[INFO] %s\n' "$*"; }
+ok() { printf '[ OK ] %s\n' "$*"; }
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+failures=0
+require_command() {
+  if command -v "$1" >/dev/null 2>&1; then ok "$1: $(command -v "$1")"; else warn "missing command: $1"; ((failures+=1)); fi
+}
 
-## ---- R packages dependency
-Rscript -e 'quit(status = !requireNamespace("dada2", quietly = TRUE))' 
-if [[ $? -eq 0 ]]; then 
-    ok "dada2 ok"
-else
-    err "dada2 not installed, try installing it"
-fi
-
-Rscript -e 'quit(status = !requireNamespace("getopt", quietly = TRUE))' 
-if [[ $? -eq 0 ]]; then 
-    ok "getopt ok"
-else
-    err "getopt not installed, try installing it"
-fi 
-
-## ---- python packages dependency scripts
-python -c "import sys, importlib.util as u; sys.exit(0 if u.find_spec('pandas') else 1)" 
-if [[ $? -eq 0 ]]; then 
-    ok "pandas ok"
-else
-    err "pandas not installed, try installing it"
-fi 
-
-# -- make scripts executable
-dos2unix scripts/*  
-chmod 755 scripts/*.py scripts/*.R scripts/*.sh
-
-if [ $? -ne 0 ]; then
-    log "Please execute the following commands:"
-    mkdir -p "$HOME/bin"
-    #echo "export PATH=$HOME/bin:$PATH >>~/.bashrc"
-    #echo "source ~/.bashrc"
-fi
-ls scripts | while read a;do 
-    rm -f "$HOME/bin/$a" && ln -s "$INSTALL_HOME"/scripts/"$a" "$HOME/bin/$a"
-    if [[ $? -ne 0 ]]; then 
-        err "Failed to link $a to $HOME/bin, please check"
-    else
-        ok "$a linked to $HOME/bin"
-    fi
+for command in bash getopt python3 Rscript fastp cutadapt seqkit awk sed find sort gzip rev tr cmp cksum realpath; do
+  require_command "$command"
 done
 
-ls scripts | while read a;do 
-    command -v "$a" &>/dev/null
-    if [[ $? -ne 0 ]]; then 
-        err "$a not in PATH, please check"
-    else
-        ok "$a ok"
-    fi
-done
-
-#  -- prepare databases
-log "Constructing 16S rRNA gene blast db"
-DB_NOTE="blastn.$(blastn -version | head -n 1 |awk '{print $2}')"
-if [ -f "data/arc_bac_16s_blastDB/$DB_NOTE" ];then
-    ok "blast db already prepared, skip"
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
+  warn "bash >=4.3 is required (found $BASH_VERSION)"
+  ((failures+=1))
 else
-    cd data/arc_bac_16s_blastDB
-    bash work.sh
-fi
-cd "$INSTALL_HOME"
-gunzip data/gtdb_both_ssu_reps_r226.assignTaxonomy.fna.gz
-
-# -- set default data paths in dd2_pipeline.sh
-PRIMER_FILE="$INSTALL_HOME/data/16s_primer.tsv"
-if [ ! -f "$PRIMER_FILE" ];then
-    err "$PRIMER_FILE not found"
-fi
-sed -i "s|^PRIMER_FILE=.*$|PRIMER_FILE=\"$PRIMER_FILE\"|" scripts/dd2_pipeline.sh
-
-BLASTDB_16S="$INSTALL_HOME/data/arc_bac_16s_blastDB/arch_bac_16s_ref_90"
-if [[ ! -f "$BLASTDB_16S.nhr" ]];then
-    err "$BLASTDB_16S not found, please check"
+  ok "bash $BASH_VERSION"
 fi
 
-sed -i "s|^BLASTDB_16S=.*$|BLASTDB_16S=\"$BLASTDB_16S\"|" scripts/dd2_pipeline.sh
-sed -i "s|default=\"BLASTn_16s_DB\"|default=\"$BLASTDB_16S\"|" scripts/is_16s_amplicon.py
+if command -v python3 >/dev/null 2>&1; then
+  if python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 9))'; then
+    ok "$(python3 --version)"
+  else
+    warn "Python >=3.9 is required"
+    ((failures+=1))
+  fi
+fi
 
-log "Installation completed."
-echo ""
-log "Take a quick look"
-dd2_pipeline.sh --help
+if command -v Rscript >/dev/null 2>&1; then
+  for package in dada2 getopt; do
+    if Rscript -e "quit(status=!requireNamespace('$package', quietly=TRUE))"; then
+      ok "R package: $package"
+    else
+      warn "missing R package: $package"
+      ((failures+=1))
+    fi
+  done
+fi
+
+if command -v cutadapt >/dev/null 2>&1; then
+  cutadapt_version="$(cutadapt --version | head -n 1)"
+  cutadapt_major="${cutadapt_version%%.*}"
+  if [[ "$cutadapt_major" =~ ^[0-9]+$ ]] && ((cutadapt_major >= 4)); then
+    ok "cutadapt $cutadapt_version"
+  else
+    warn "Cutadapt >=4.1 is recommended; found $cutadapt_version"
+    ((failures+=1))
+  fi
+fi
+
+if [[ "$BUILD_16S_DB" == true ]]; then
+  for command in blastn makeblastdb cd-hit-est wget; do require_command "$command"; done
+  if ((failures == 0)); then
+    log "Building the optional 16S BLAST database"
+    bash "$ROOT_DIR/data/arc_bac_16s_blastDB/work.sh"
+  fi
+elif [[ ! -f "$ROOT_DIR/data/arc_bac_16s_blastDB/arch_bac_16s_ref_90.nhr" ]]; then
+  warn "optional 16S BLAST DB is absent; run: bash setup.sh --build-16s-db"
+fi
+
+if ((failures > 0)); then
+  warn "$failures required check(s) failed; see README.md for installation guidance"
+  exit 1
+fi
+
+if [[ "$CHECK_ONLY" == false ]]; then
+  mkdir -p -- "$PREFIX"
+  for script in "$ROOT_DIR"/scripts/*; do
+    [[ -f "$script" ]] || continue
+    case "$script" in *.py|*.R|*.sh) ;; *) continue ;; esac
+    chmod 755 -- "$script"
+    ln -sfn -- "$script" "$PREFIX/${script##*/}"
+  done
+  ok "commands linked into $PREFIX"
+  case ":$PATH:" in
+    *":$PREFIX:"*) ;;
+    *) warn "$PREFIX is not in PATH; add: export PATH=\"$PREFIX:\$PATH\"" ;;
+  esac
+fi
+
+log "amplicon_analysis_hub setup complete"
+bash "$ROOT_DIR/scripts/amplicon_pipeline.sh" --version

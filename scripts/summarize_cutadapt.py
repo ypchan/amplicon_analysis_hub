@@ -1,152 +1,167 @@
 #!/usr/bin/env python3
+"""Summarize Cutadapt text reports into deterministic TSV tables."""
 
-"""
-summarize_cutadapt.py -- parse cutadapt log files and summarize primer use
+from __future__ import annotations
 
-date: 2025-7-30
-contact: yanpengch@qq.com
-"""
-
+import argparse
+import csv
 import re
-import pandas as pd
+import sys
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Iterable
 
-def parse_cutadapt(log: str, mode: str) -> list:
-    """Parse a single Cutadapt log file and extract primer information."""
-    sample_name = Path(log).stem.replace('.cutadapt', '')
-
-    with open(log, 'rt') as infh:
-        txt = infh.read()
-
-    if mode == 'PE':
-        r1_name = r1_sequence = r1_strand = 'NA'
-        r2_name = r2_sequence = r2_strand = 'NA'
-        r1_count = r2_count = 0
-        r1_percent = r2_percent = 0
-
-        try:
-            r_pairs_count = int(re.search(r"Total read pairs processed:\s+([\d,]+)", txt).group(1).replace(',', ''))
-            r1_count, r1_percent = map(lambda x: float(x.strip('%')) if '%' in x else int(x),
-                                       re.search(r"Read 1 with adapter:\s+(\d+)\s+\(([\d.]+%)\)", txt).groups())
-            r2_count, r2_percent = map(lambda x: float(x.strip('%')) if '%' in x else int(x),
-                                       re.search(r"Read 2 with adapter:\s+(\d+)\s+\(([\d.]+%)\)", txt).groups())
-        except Exception:
-            return [sample_name, r1_name, r1_sequence, r1_count, r1_percent, r1_strand,
-                    r2_name, r2_sequence, r2_count, r2_percent, r2_strand]
-
-        if r1_percent >= 0.5:
-            r1_matches = re.findall(
-                r"=== First read: Adapter (\S+).*?Sequence: ([A-Z]+);.*?Trimmed: ([\d,]+) times;.*?Reverse-complemented: ([\d,]+)",
-                txt, re.S)
-            r1_best = max(r1_matches, key=lambda x: max(int(x[2].replace(',', '')), int(x[3].replace(',', ''))), default=None)
-            if r1_best:
-                r1_name, r1_sequence, r1_trim, r1_rc = r1_best
-                r1_trim, r1_rc = int(r1_trim.replace(',', '')), int(r1_rc.replace(',', ''))
-                r1_count = max(r1_trim, r1_rc)
-                r1_strand = '+' if r1_trim >= r1_rc else '-'
-
-        if r2_percent >= 0.5:
-            r2_matches = re.findall(
-                r"=== Second read: Adapter (\S+).*?Sequence: ([A-Z]+);.*?Trimmed: ([\d,]+) times;.*?Reverse-complemented: ([\d,]+)",
-                txt, re.S)
-            r2_best = max(r2_matches, key=lambda x: max(int(x[2].replace(',', '')), int(x[3].replace(',', ''))), default=None)
-            if r2_best:
-                r2_name, r2_sequence, r2_trim, r2_rc = r2_best
-                r2_trim, r2_rc = int(r2_trim.replace(',', '')), int(r2_rc.replace(',', ''))
-                r2_count = max(r2_trim, r2_rc)
-                r2_strand = '+' if r2_trim >= r2_rc else '-'
-
-        return [
-            sample_name, r1_name, r1_sequence, r1_count, r1_count / r_pairs_count * 100, r1_strand,
-            r2_name, r2_sequence, r2_count, r2_count / r_pairs_count * 100, r2_strand
-        ]
-
-    else:  # SE mode
-        r_name = r_sequence = r_strand = 'NA'
-        r_count = 0
-        r_percent = 0
-
-        try:
-            r_total_count = int(re.search(r"Total reads processed:\s+([\d,]+)", txt).group(1).replace(',', ''))
-            r_count, r_percent = map(lambda x: float(x.strip('%')) if '%' in x else int(x),
-                                     re.search(r"Reads with adapter:\s+(\d+)\s+\(([\d.]+%)\)", txt).groups())
-        except Exception:
-            return [sample_name, r_name, r_sequence, r_count, r_percent, r_strand]
-
-        if r_percent >= 0.5:
-            r_matches = re.findall(
-                r"=== Adapter (\S+).*?Sequence: ([A-Z]+);.*?Trimmed: ([\d,]+) times;.*?Reverse-complemented: ([\d,]+)",
-                txt, re.S)
-            r_best = max(r_matches, key=lambda x: max(int(x[2].replace(',', '')), int(x[3].replace(',', ''))), default=None)
-            if r_best:
-                r_name, r_sequence, r_trim, r_rc = r_best
-                r_trim, r_rc = int(r_trim.replace(',', '')), int(r_rc.replace(',', ''))
-                r_count = max(r_trim, r_rc)
-                r_strand = '+' if r_trim >= r_rc else '-'
-
-        return [sample_name, r_name, r_sequence, r_count, r_count / r_total_count * 100, r_strand]
+VERSION = "2.0.0"
+INTEGER = r"([\d,]+)"
 
 
-def batch_parse_cutadapt(directory: str, mode: str, threads: int = 4):
-    """Parse all Cutadapt logs in a directory using multithreading and summarize primer usage."""
-    log_files = list(Path(directory).glob("*.cutadapt.log"))
-    total_samples = len(log_files)
-    results = []
+@dataclass(frozen=True)
+class AdapterHit:
+    name: str = "NA"
+    sequence: str = "NA"
+    count: int = 0
+    strand: str = "NA"
 
-    # Multithreading for parsing
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        future_to_file = {executor.submit(parse_cutadapt, str(f), mode.upper()): f for f in log_files}
-        for future in as_completed(future_to_file):
-            result = future.result()
-            results.append(result)
 
-    # Construct detailed table
-    if mode.upper() == 'PE':
-        columns = ['sample_name', 'r1_name', 'r1_sequence', 'r1_count', 'r1_percent', 'r1_strand',
-                   'r2_name', 'r2_sequence', 'r2_count', 'r2_percent', 'r2_strand']
+def _integer(pattern: str, text: str, default: int = 0) -> int:
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    return int(match.group(1).replace(",", "")) if match else default
+
+
+def _best_adapter(text: str, heading: str) -> AdapterHit:
+    """Return the most frequently trimmed adapter in a report section."""
+    if heading:
+        marker = rf"===\s*{heading}:\s*Adapter\s+['\"]?([^'\"=\n]+)['\"]?\s*==="
     else:
-        columns = ['sample_name', 'r_name', 'r_sequence', 'r_count', 'r_percent', 'r_strand']
+        marker = r"===\s*Adapter\s+['\"]?([^'\"=\n]+)['\"]?\s*==="
+    starts = list(re.finditer(marker, text, flags=re.IGNORECASE))
+    hits: list[AdapterHit] = []
+    for index, match in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(text)
+        block = text[match.end():end]
+        sequence_match = re.search(r"Sequence:\s*([A-Z]+)", block, flags=re.IGNORECASE)
+        count = _integer(rf"Trimmed:\s*{INTEGER}\s+times", block)
+        rc_count = _integer(rf"Reverse-complemented:\s*{INTEGER}", block)
+        hits.append(
+            AdapterHit(
+                name=match.group(1).strip(),
+                sequence=sequence_match.group(1).upper() if sequence_match else "NA",
+                count=max(count, rc_count),
+                strand="-" if rc_count > count else "+",
+            )
+        )
+    return max(hits, key=lambda hit: hit.count, default=AdapterHit())
 
-    df = pd.DataFrame(results, columns=columns)
-    df.to_csv('cutadapt_details.csv', sep='\t', index=False)
 
-    # Primer usage summary
-    def summarize(df, group_cols, primer_type):
-        summary = df.groupby(group_cols).size().reset_index(name='n')
-        summary.insert(0, 'primer_type', primer_type)
-        summary['count'] = summary['n'].apply(lambda x: f"{x}/{total_samples}")
-        summary['percent'] = summary['n'].apply(lambda x: f"{int(round(x / total_samples * 100))}%")
-        summary = summary.drop(columns='n')
-        return summary
+def parse_report(path: Path, mode: str) -> dict[str, object]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    sample = path.name.removesuffix(".cutadapt.log")
+    if mode == "PE":
+        total = _integer(rf"Total read pairs processed:\s*{INTEGER}", text)
+        r1 = _best_adapter(text, "First read")
+        r2 = _best_adapter(text, "Second read")
+        return {
+            "sample": sample,
+            "total_reads_or_pairs": total,
+            "r1_name": r1.name,
+            "r1_sequence": r1.sequence,
+            "r1_count": r1.count,
+            "r1_percent": round(100 * r1.count / total, 3) if total else 0.0,
+            "r1_strand": r1.strand,
+            "r2_name": r2.name,
+            "r2_sequence": r2.sequence,
+            "r2_count": r2.count,
+            "r2_percent": round(100 * r2.count / total, 3) if total else 0.0,
+            "r2_strand": r2.strand,
+            "parse_status": "ok" if total else "missing_total",
+        }
+    total = _integer(rf"Total reads processed:\s*{INTEGER}", text)
+    read = _best_adapter(text, "")
+    return {
+        "sample": sample,
+        "total_reads_or_pairs": total,
+        "read_name": read.name,
+        "read_sequence": read.sequence,
+        "read_count": read.count,
+        "read_percent": round(100 * read.count / total, 3) if total else 0.0,
+        "read_strand": read.strand,
+        "parse_status": "ok" if total else "missing_total",
+    }
 
-    if mode.upper() == 'PE':
-        r1_summary = summarize(df, ['r1_name', 'r1_sequence', 'r1_strand'], 'R1')
-        r1_summary.columns = ['primer_type', 'name', 'sequence', 'strand', 'count', 'percent']
 
-        r2_summary = summarize(df, ['r2_name', 'r2_sequence', 'r2_strand'], 'R2')
-        r2_summary.columns = ['primer_type', 'name', 'sequence', 'strand', 'count', 'percent']
+def write_tsv(path: Path, rows: Iterable[dict[str, object]], fields: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
 
-        summary_df = pd.concat([r1_summary, r2_summary], ignore_index=True)
 
-    else:
-        r_summary = summarize(df, ['r_name', 'r_sequence', 'r_strand'], 'SE')
-        r_summary.columns = ['primer_type', 'name', 'sequence', 'strand', 'count', 'percent']
-        summary_df = r_summary
+def summarize(rows: list[dict[str, object]], mode: str) -> list[dict[str, object]]:
+    total = len(rows)
+    read_labels = ("r1", "r2") if mode == "PE" else ("read",)
+    result: list[dict[str, object]] = []
+    for label in read_labels:
+        counts = Counter(
+            (str(row[f"{label}_name"]), str(row[f"{label}_sequence"]), str(row[f"{label}_strand"]))
+            for row in rows
+        )
+        for (name, sequence, strand), count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+            result.append(
+                {
+                    "read": label.upper(),
+                    "primer": name,
+                    "sequence": sequence,
+                    "strand": strand,
+                    "samples": count,
+                    "total_samples": total,
+                    "sample_percent": round(100 * count / total, 3) if total else 0.0,
+                }
+            )
+    return result
 
-    summary_df.to_csv('cutadapt_summary.csv', sep='\t', index=False)
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("-d", "--dir", required=True, type=Path, help="Directory containing *.cutadapt.log")
+    parser.add_argument("-m", "--mode", required=True, type=str.upper, choices=("PE", "SE"), help="Read layout")
+    parser.add_argument("-o", "--output-dir", type=Path, default=Path("."), help="Directory for summary TSVs")
+    parser.add_argument("-t", "--threads", type=int, default=4, help="Concurrent log parsers")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    args = parser.parse_args()
+    if args.threads < 1:
+        parser.error("--threads must be >= 1")
+    if not args.dir.is_dir():
+        parser.error(f"--dir is not a directory: {args.dir}")
+    return args
+
+
+def main() -> int:
+    args = parse_args()
+    reports = sorted(args.dir.glob("*.cutadapt.log"))
+    if not reports:
+        print(f"error: no *.cutadapt.log files in {args.dir}", file=sys.stderr)
+        return 2
+    with ThreadPoolExecutor(max_workers=min(args.threads, len(reports))) as executor:
+        rows = list(executor.map(lambda path: parse_report(path, args.mode), reports))
+    rows.sort(key=lambda row: str(row["sample"]))
+    detail_fields = list(rows[0])
+    write_tsv(args.output_dir / "cutadapt_details.tsv", rows, detail_fields)
+    summary_rows = summarize(rows, args.mode)
+    write_tsv(
+        args.output_dir / "cutadapt_summary.tsv",
+        summary_rows,
+        ["read", "primer", "sequence", "strand", "samples", "total_samples", "sample_percent"],
+    )
+    failed = sum(row["parse_status"] != "ok" for row in rows)
+    print(f"Parsed {len(rows)} reports ({failed} incomplete); output: {args.output_dir}")
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('-d', '--dir', type=str, required=True, help='Directory containing *.cutadapt.log files')
-    parser.add_argument('-m', '--mode', type=str, choices=['PE', 'SE'], required=True, help='Sequencing mode: PE or SE')
-    parser.add_argument('-t', '--threads', type=int, default=4, help='Number of threads to use (default: 4)')
-    args = parser.parse_args()
-
-    batch_parse_cutadapt(args.dir, args.mode, threads=args.threads)
-
-    print("    Cutadapt parsing complete.")
-    print("        Details: cutadapt_details.csv")
-    print("        Summary: cutadapt_summary.csv")
+    raise SystemExit(main())

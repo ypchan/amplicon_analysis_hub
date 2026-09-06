@@ -1,126 +1,131 @@
-"""
-unify_fq_suffix.py -- Unify FASTQ filenames, compress if needed, and standardize suffix naming.
+#!/usr/bin/env python3
+"""Safely normalize FASTQ suffixes and optionally gzip uncompressed inputs."""
 
-date: 2025-07-09
-contact: yanpengch@qq.com
+from __future__ import annotations
 
-Usage:
-    unify_fq_suffix.py -i input_dir -1 _R1.fastq.gz -2 _R2.fastq.gz -f _R1.fq.gz -r _R2.fq.gz -t 8
-    unify_fq_suffix.py -i input_dir -1 _R1.fastq.gz -2 _R2.fastq.gz -t 8
-"""
-
-import os
-import sys
-import glob
-import time
-import shutil
 import argparse
-import datetime
-import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import gzip
+import os
+import shutil
+import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
-def compress_and_move(src_path, dest_path):
-    if os.path.abspath(src_path) == os.path.abspath(dest_path):
-        return "skipped"
+VERSION = "2.0.0"
 
-    if os.path.exists(dest_path):
-        return "skipped"
 
-    if src_path.endswith(".gz"):
-        shutil.move(src_path, dest_path)
+def transformed_name(path: Path, old_suffix: str, new_suffix: str, trim: tuple[str, ...]) -> str:
+    name = path.name[: -len(old_suffix)] if old_suffix else path.name
+    for token in trim:
+        name = name.replace(token, "")
+    if not name:
+        raise ValueError(f"normalization creates an empty sample name for {path.name}")
+    return name + new_suffix
+
+
+def transfer(source: Path, destination: Path, dry_run: bool) -> str:
+    if source.resolve() == destination.resolve():
+        return f"unchanged\t{source}"
+    if dry_run:
+        return f"would_normalize\t{source}\t{destination}"
+    if destination.exists():
+        raise FileExistsError(f"destination already exists: {destination}")
+    source_gz = source.name.endswith(".gz")
+    destination_gz = destination.name.endswith(".gz")
+    if source_gz == destination_gz:
+        source.replace(destination)
     else:
-        with open(dest_path, "wb") as out_f:
-            subprocess.run(["gzip", "-c", src_path], stdout=out_f, check=True)
-        os.remove(src_path)
-    return "done"
+        # Write atomically so an interrupted compression never leaves a valid-
+        # looking partial destination.
+        fd, temp_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+        os.close(fd)
+        temp_path = Path(temp_name)
+        try:
+            source_open = gzip.open if source_gz else Path.open
+            destination_open = gzip.open if destination_gz else Path.open
+            with source_open(source, "rb") as src, destination_open(temp_path, "wb") as dst:
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
+            temp_path.replace(destination)
+            source.unlink()
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+    return f"normalized\t{source}\t{destination}"
 
 
-def process_pair(r1_file, r2_file, r1_out, r2_out):
-    status1 = compress_and_move(r1_file, r1_out)
-    status2 = compress_and_move(r2_file, r2_out)
-    return f"    ✔ {os.path.basename(r1_out)} / {os.path.basename(r2_out)} : {status2}"
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("-i", "--input-dir", "--indir", dest="input_dir", required=True, type=Path,
+                        help="Flat directory containing FASTQs")
+    parser.add_argument("-1", "--reads1-suffix-in", "--reads1_suffix_in", dest="r1_in",
+                        help="Current R1 or SE suffix")
+    parser.add_argument("-2", "--reads2-suffix-in", "--reads2_suffix_in", dest="r2_in",
+                        help="Current R2 suffix; requires --reads1-suffix-in")
+    parser.add_argument("-f", "--reads1-suffix-out", "--reads1_suffix_std", dest="r1_out",
+                        default="_R1.fastq.gz", help="Normalized R1/SE suffix")
+    parser.add_argument("-r", "--reads2-suffix-out", "--reads2_suffix_std", dest="r2_out",
+                        default="_R2.fastq.gz", help="Normalized R2 suffix")
+    parser.add_argument("-t", "--threads", type=int, default=4, help="Concurrent file operations")
+    parser.add_argument("-s", "--trim", "--trim_str", dest="trim", default="",
+                        help="Comma-separated literal tokens removed from sample names")
+    parser.add_argument("--dry-run", action="store_true", help="Validate and print without changing files")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    args = parser.parse_args()
+    if not args.r1_in:
+        parser.error("--reads1-suffix-in is required")
+    if args.threads < 1:
+        parser.error("--threads must be >= 1")
+    if not args.input_dir.is_dir():
+        parser.error(f"input directory not found: {args.input_dir}")
+    if args.r2_in and args.r1_in == args.r2_in:
+        parser.error("R1 and R2 input suffixes must differ")
+    return args
 
 
-def process_single(se_file, se_out):
-    status = compress_and_move(se_file, se_out)
-    return f"    ✔ {os.path.basename(se_out)} : {status}"
+def main() -> int:
+    args = parse_args()
+    trim = tuple(token for token in args.trim.split(",") if token)
+    r1_files = sorted(path for path in args.input_dir.iterdir() if path.is_file() and path.name.endswith(args.r1_in))
+    if not r1_files:
+        print(f"error: no files end with {args.r1_in!r}", file=sys.stderr)
+        return 2
+
+    tasks: list[tuple[Path, Path]] = []
+    for r1 in r1_files:
+        r1_dest = r1.with_name(transformed_name(r1, args.r1_in, args.r1_out, trim))
+        tasks.append((r1, r1_dest))
+        if args.r2_in:
+            sample = r1.name[: -len(args.r1_in)]
+            r2 = r1.with_name(sample + args.r2_in)
+            if not r2.is_file():
+                print(f"error: missing mate for {r1.name}: {r2.name}", file=sys.stderr)
+                return 2
+            r2_dest = r2.with_name(transformed_name(r2, args.r2_in, args.r2_out, trim))
+            tasks.append((r2, r2_dest))
+
+    destinations = [destination for _, destination in tasks]
+    if len(destinations) != len(set(destinations)):
+        print("error: multiple inputs map to the same output name", file=sys.stderr)
+        return 2
+    conflicts = [str(destination) for source, destination in tasks
+                 if source.resolve() != destination.resolve() and destination.exists()]
+    if conflicts:
+        print("error: destination(s) already exist: " + ", ".join(conflicts), file=sys.stderr)
+        return 2
+
+    try:
+        with ThreadPoolExecutor(max_workers=min(args.threads, len(tasks))) as executor:
+            for result in executor.map(lambda pair: transfer(*pair, args.dry_run), tasks):
+                print(result)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Finished: {len(tasks)} file(s)")
+    return 0
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("-i", "--indir", required=True, help="Input directory containing FASTQ files, required")
-    parser.add_argument("-1", "--reads1_suffix_in", help="Suffix of input R1 or SE reads, optional")
-    parser.add_argument("-2", "--reads2_suffix_in", help="Suffix of input R2 reads, optional")
-    parser.add_argument("-f", "--reads1_suffix_std", default='_R1.fq.gz', help="Standard suffix for R1/SE reads (if -1, default: _R1.fq.gz)")
-    parser.add_argument("-r", "--reads2_suffix_std", default="_R2.fq.gz", help="Standard suffix for R2reads (if -2, default: _R2.fq.gz)")
-    parser.add_argument("-t", "--threads", type=int, default=4, help="Number of threads (default: 4)")
-    parser.add_argument("-s", "--trim_str", default="", help="Comma-separated patterns to remove from filenames")
-    args = parser.parse_args()
-
-    if not args.reads1_suffix_in and not args.reads2_suffix_in:
-        parser.error("At least one of -1 or -2 must be specified.")
-
-    start_time = time.time()
-
-    indir = args.indir
-    r1_suffix = args.reads1_suffix_in
-    r2_suffix = args.reads2_suffix_in
-    r1_suffix_std = args.reads1_suffix_std
-    r2_suffix_std = args.reads2_suffix_std
-    trim_patterns = [p for p in args.trim_str.split(",") if p]
-
-    pattern = ""
-    file_count = 0
-    if r1_suffix and r2_suffix:
-        pattern = os.path.join(indir, f"*{r1_suffix}")
-        file_count = sum(1 for _ in glob.iglob(pattern, recursive=True)) * 2
-    elif r1_suffix:
-        pattern = os.path.join(indir,  f"*{r1_suffix}")
-        file_count = sum(1 for _ in glob.iglob(pattern, recursive=True))
-    elif r2_suffix:
-        pattern = os.path.join(indir, f"*{r2_suffix}")
-        file_count = sum(1 for _ in glob.iglob(pattern, recursive=True))
-
-    threads = min(args.threads, max(1, file_count))
-    tasks = []
-
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        if r1_suffix and r2_suffix:
-            for r1_file in glob.iglob(os.path.join(indir, f"*{r1_suffix}"), recursive=True):
-                r2_file = r1_file.replace(r1_suffix, r2_suffix)
-                name_base = os.path.basename(r1_file).rsplit(r1_suffix, 1)[0]
-                for pat in trim_patterns:
-                    name_base = name_base.replace(pat, "")
-                dirpath = os.path.dirname(r1_file)
-                r1_out = os.path.join(dirpath, f"{name_base}{r1_suffix_std}")
-                r2_out = os.path.join(dirpath, f"{name_base}{r2_suffix_std}")
-                tasks.append(executor.submit(process_pair, r1_file, r2_file, r1_out, r2_out))
-
-        elif r1_suffix:
-            for se_file in glob.iglob(os.path.join(indir,  f"*{r1_suffix}"), recursive=True):
-                name_base = os.path.basename(se_file).rsplit(r1_suffix, 1)[0]
-                for pat in trim_patterns:
-                    name_base = name_base.replace(pat, "")
-                dirpath = os.path.dirname(se_file)
-                se_out = os.path.join(dirpath, f"{name_base}{r1_suffix_std}")
-                tasks.append(executor.submit(process_single, se_file, se_out))
-
-        elif r2_suffix:
-            for se_file in glob.iglob(os.path.join(indir,  f"*{r2_suffix}"), recursive=True):
-                name_base = os.path.basename(se_file).rsplit(r2_suffix, 1)[0]
-                for pat in trim_patterns:
-                    name_base = name_base.replace(pat, "")
-                dirpath = os.path.dirname(se_file)
-                se_out = os.path.join(dirpath, f"{name_base}{r2_suffix_std}")
-                tasks.append(executor.submit(process_single, se_file, se_out))
-
-        for future in as_completed(tasks):
-            try:
-                print(future.result())
-            except Exception as e:
-                print(f"❌ Error during task: {e}", file=sys.stderr)
-
-    elapsed = time.time() - start_time
-    print(f"🎉 Finished. Elapsed time: {datetime.timedelta(seconds=int(elapsed))}")
+    raise SystemExit(main())

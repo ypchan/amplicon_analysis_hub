@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.Rhistory
+.RData
+.Ruserdata
+
+# Default runtime outputs
+amplicon_analysis_results/
+artifacts/
+pred_parts/
+
+# Optional locally built 16S database and downloads
+data/arc_bac_16s_blastDB/*.fna
+data/arc_bac_16s_blastDB/*.fna.gz
+data/arc_bac_16s_blastDB/*.clstr
+data/arc_bac_16s_blastDB/*.n??
+data/arc_bac_16s_blastDB/*.not
+data/arc_bac_16s_blastDB/*.ntf
+data/arc_bac_16s_blastDB/*.nto
+data/arc_bac_16s_blastDB/database_manifest.tsv

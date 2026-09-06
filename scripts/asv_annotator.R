@@ -1,228 +1,96 @@
 #!/usr/bin/env Rscript
 
-# asv_annotator.R
-# Build an ASV count matrix with taxonomy for DADA2 results.
-#
-# Output columns:
-#   1) ASV           (ASV sequence; one unique sequence per row)
-#   2) Taxonomy      (joined ranks: Kingdom;Phylum;Class;Order;Family;Genus;Species)
-#   3..N) sample counts (one column per sample; preserved in the same order as input seqtab)
-#
-# Notes:
-#   - This script ONLY annotates using reference FASTA via assignTaxonomy()
-#     (and optional addSpecies()). It does NOT merge an existing taxa.rds.
-#   - Compatible with dada2 variants where assignTaxonomy takes either
-#     'refFasta' or 'trainingSet'; same for addSpecies().
-#   - All comments are in English by request.
-#
-# Example:
-#   Rscript asv_annotator.R \
-#     --seqtab_rds seqtab.nochim.rds \
-#     --output_csv asv_counts.csv \
-#     --train_fasta silva_nr99_v138.2_toSpecies_trainset.fa.gz \
-#     --species_fasta silva_v138.2_assignSpecies.fa.gz \
-#     --minBoot 50 --threads 8 --tax_delim ";"
-#
-# Required flags:
-#   --seqtab_rds    Path to seqtab.nochim RDS (rows=samples, cols=ASVs)
-#   --output_csv    Path to write the output CSV
-#   --train_fasta   Reference training FASTA for assignTaxonomy()
-#
-# Optional flags:
-#   --species_fasta Path to species FASTA for addSpecies()
-#   --minBoot       Integer; minimum bootstrap for assignTaxonomy() [default: 50]
-#   --threads       Integer; threads for assignTaxonomy() [default: detectCores-1]
-#   --tax_delim     Character; taxonomy rank delimiter [default: ";"]
-#   --help          Show help and exit
-#
-# Exit codes:
-#   0 success; 1 usage error; >1 runtime errors.
+# Assign taxonomy to DADA2 ASVs and write an ASV-by-sample count table.
 
 suppressPackageStartupMessages({
-    library(getopt)
-    library(dada2)
-    library(dplyr)
-    library(readr)
-    library(tibble)
+  library(getopt)
 })
 
-# --------------------------- CLI (getopt) --------------------------------------
+VERSION <- "2.0.0"
 spec <- matrix(c(
-    "seqtab_rds",    "s", 1, "character",
-    "output_csv",    "o", 1, "character",
-    "train_fasta",   "t", 1, "character",
-    "species_fasta", "p", 2, "character",
-    "minBoot",       "b", 2, "integer",
-    "threads",       "n", 2, "integer",
-    "tax_delim",     "d", 2, "character",
-    "help",          "h", 0, "logical"
+  "seqtab_rds",    "s", 1, "character",
+  "output",        "o", 1, "character",
+  "train_fasta",   "t", 1, "character",
+  "species_fasta", "p", 1, "character",
+  "marker",        "M", 1, "character",
+  "min_boot",      "b", 1, "integer",
+  "threads",       "n", 1, "integer",
+  "tax_delim",     "d", 1, "character",
+  "no_try_rc",      NA, 0, "logical",
+  "help",          "h", 0, "logical",
+  "version",       "V", 0, "logical"
 ), byrow = TRUE, ncol = 4)
 
+usage <- function(status = 0L) {
+  cat("Assign taxonomy and combine it with a DADA2 ASV table.\n\n")
+  cat("Usage:\n  asv_annotator.R -s seqtab.nochim.rds -t TRAINING.fa.gz -o ASVs.tsv [options]\n\n")
+  cat("Required:\n")
+  cat("  -s, --seqtab_rds RDS      DADA2 sample-by-sequence matrix\n")
+  cat("  -t, --train_fasta FASTA   assignTaxonomy training FASTA (GTDB/SILVA/UNITE)\n")
+  cat("  -o, --output FILE         Output .tsv or .csv\n\n")
+  cat("Options:\n")
+  cat("  -p, --species_fasta FILE  Exact species reference for addSpecies (usually 16S)\n")
+  cat("  -M, --marker NAME         16s|its|other; documentation metadata (default: 16s)\n")
+  cat("  -b, --min_boot INT        Minimum taxonomy bootstrap, 0..100 (default: 50)\n")
+  cat("  -n, --threads INT         Taxonomy threads (default: min(8, detected cores))\n")
+  cat("  -d, --tax_delim STR       Collapsed-taxonomy delimiter (default: ;)\n")
+  cat("      --no_try_rc           Disable reverse-complement classification\n")
+  cat("  -h, --help                Show help\n")
+  cat("  -V, --version             Show version\n\n")
+  cat("Use a marker-compatible training set: GTDB/SILVA/RDP for 16S and UNITE for\n")
+  cat("fungal ITS. Database release and sequence orientation are recorded in your\n")
+  cat("workflow metadata, not inferred by this command.\n")
+  quit(status = status)
+}
+
 opt <- getopt(spec)
+if (isTRUE(opt$help)) usage(0L)
+if (isTRUE(opt$version)) { cat("asv_annotator.R ", VERSION, "\n", sep = ""); quit(status = 0L) }
+if (is.null(opt$seqtab_rds) || is.null(opt$train_fasta) || is.null(opt$output)) usage(2L)
+if (!requireNamespace("dada2", quietly = TRUE)) stop("R package 'dada2' is required")
 
-print_usage <- function() {
-    cat("
-asv_annotator.R
+marker <- tolower(if (is.null(opt$marker)) "16s" else opt$marker)
+if (!marker %in% c("16s", "its", "other")) stop("--marker must be 16s, its, or other")
+min_boot <- as.integer(if (is.null(opt$min_boot)) 50L else opt$min_boot)
+detected <- suppressWarnings(parallel::detectCores(logical = TRUE))
+if (is.na(detected)) detected <- 1L
+threads <- as.integer(if (is.null(opt$threads)) min(8L, detected) else opt$threads)
+delimiter <- if (is.null(opt$tax_delim)) ";" else opt$tax_delim
+if (!is.finite(min_boot) || min_boot < 0L || min_boot > 100L) stop("--min_boot must be in [0,100]")
+if (!is.finite(threads) || threads < 1L) stop("--threads must be >= 1")
+if (!nzchar(delimiter)) stop("--tax_delim cannot be empty")
 
-Required:
-  --seqtab_rds    <path>  DADA2 seqtab.nochim RDS (rows=samples, cols=ASVs)
-  --output_csv    <path>  Output CSV path
-  --train_fasta   <path>  Reference training FASTA (e.g., SILVA) for assignTaxonomy()
-
-Optional:
-  --species_fasta <path>  Species FASTA for addSpecies()
-  --minBoot       <int>   Minimum bootstrap for assignTaxonomy() [default: 50]
-  --threads       <int>   Threads for assignTaxonomy() [default: detectCores-1]
-  --tax_delim     <char>  Delimiter used to join taxonomy ranks [default: ';']
-  --help                  Show this help
-
-Example:
-  Rscript asv_annotator.R \\
-    --seqtab_rds seqtab.nochim.rds \\
-    --output_csv asv_counts.csv \\
-    --train_fasta silva_nr99_v138.2_toSpecies_trainset.fa.gz \\
-    --species_fasta silva_v138.2_assignSpecies.fa.gz \\
-    --minBoot 50 --threads 8 --tax_delim ';'
-\n")
+seqtab_path <- normalizePath(opt$seqtab_rds, mustWork = TRUE)
+training_path <- normalizePath(opt$train_fasta, mustWork = TRUE)
+seqtab <- readRDS(seqtab_path)
+if (!is.matrix(seqtab) || is.null(rownames(seqtab)) || is.null(colnames(seqtab))) {
+  stop("seqtab RDS must be a sample-by-ASV matrix with row and column names")
 }
+if (anyDuplicated(rownames(seqtab)) || anyDuplicated(colnames(seqtab))) stop("seqtab names must be unique")
+if (any(!is.finite(seqtab)) || any(seqtab < 0)) stop("seqtab contains invalid counts")
 
-if (!is.null(opt$help)) { print_usage(); quit(status = 0) }
-
-req_missing <- c(
-    if (is.null(opt$seqtab_rds)) "--seqtab_rds" else NULL,
-    if (is.null(opt$output_csv)) "--output_csv" else NULL,
-    if (is.null(opt$train_fasta)) "--train_fasta" else NULL
-)
-if (length(req_missing) > 0) {
-    cat("Missing required options: ", paste(req_missing, collapse = ", "), "\n\n", sep = "")
-    print_usage(); quit(status = 1)
-}
-
-minBoot  <- if (!is.null(opt$minBoot)) as.integer(opt$minBoot) else 50L
-threads  <- if (!is.null(opt$threads)) as.integer(opt$threads) else max(1L, parallel::detectCores() - 1L)
-tax_delim <- if (!is.null(opt$tax_delim)) as.character(opt$tax_delim) else ";"
-
-# --------------------------- Load seqtab ---------------------------------------
-if (!file.exists(opt$seqtab_rds)) stop("seqtab RDS not found: ", opt$seqtab_rds)
-seqtab <- readRDS(opt$seqtab_rds)
-if (!is.matrix(seqtab)) seqtab <- as.matrix(seqtab)
-
-# Validate structure: rows = samples, cols = ASVs (sequences as colnames)
-if (is.null(colnames(seqtab)) || any(!nzchar(colnames(seqtab)))) {
-    stop("seqtab has no valid column names; columns must be ASV sequences.")
-}
-
-# Ensure integer-like counts (avoid scientific notation in output)
-storage.mode(seqtab) <- "integer"
-
-# Transpose to ASV rows × sample columns (preferred output orientation)
-count_mat <- t(seqtab)  # rows = ASV, cols = samples
-
-# Remember sample column order (exactly as in input)
-sample_cols <- colnames(seqtab)
-
-# Defensive checks on ASV keys
-asv_keys <- rownames(count_mat)
-if (anyDuplicated(asv_keys) > 0) {
-    dupn <- sum(duplicated(asv_keys))
-    stop("Detected duplicated ASV sequences (rownames after transpose): ", dupn,
-         ". Each ASV sequence must be unique.")
-}
-
-# --------------------------- Taxonomy ------------------------------------------
-expected_ranks <- c("Kingdom","Phylum","Class","Order","Family","Genus","Species")
-
-if (!file.exists(opt$train_fasta)) stop("train_fasta not found: ", opt$train_fasta)
-asv_vec <- asv_keys
-
-message("Running assignTaxonomy() [threads=", threads, ", minBoot=", minBoot, "] ...")
-
-# Version-robust call to assignTaxonomy: accept 'refFasta' or 'trainingSet'
-at_formals <- names(formals(dada2::assignTaxonomy))
-use_refFasta    <- "refFasta"    %in% at_formals
-use_trainingSet <- "trainingSet" %in% at_formals
-
-if (use_refFasta) {
-    taxa <- assignTaxonomy(asv_vec,
-                           refFasta = opt$train_fasta,
-                           tryRC = TRUE,
-                           multithread = threads,
-                           minBoot = minBoot)
-} else if (use_trainingSet) {
-    taxa <- assignTaxonomy(asv_vec,
-                           trainingSet = opt$train_fasta,
-                           tryRC = TRUE,
-                           multithread = threads,
-                           minBoot = minBoot)
-} else {
-    # Fallback: positional second argument
-    taxa <- assignTaxonomy(asv_vec,
-                           opt$train_fasta,
-                           tryRC = TRUE,
-                           multithread = threads,
-                           minBoot = minBoot)
-}
-
-# Optional species refinement
+message("Assigning taxonomy to ", ncol(seqtab), " ASVs with ", threads, " thread(s)")
+taxa <- dada2::assignTaxonomy(colnames(seqtab), training_path, minBoot = min_boot,
+                              tryRC = !isTRUE(opt$no_try_rc), multithread = threads,
+                              outputBootstraps = FALSE, verbose = TRUE)
 if (!is.null(opt$species_fasta)) {
-    if (!file.exists(opt$species_fasta)) stop("species_fasta not found: ", opt$species_fasta)
-    message("Running addSpecies() ...")
-    
-    as_formals <- names(formals(dada2::addSpecies))
-    if ("refFasta" %in% as_formals) {
-        taxa <- addSpecies(taxa, refFasta = opt$species_fasta, tryRC = TRUE)
-    } else if ("trainingSet" %in% as_formals) {
-        taxa <- addSpecies(taxa, trainingSet = opt$species_fasta, tryRC = TRUE)
-    } else {
-        taxa <- addSpecies(taxa, opt$species_fasta, tryRC = TRUE)
-    }
+  if (marker == "its") warning("addSpecies exact matching is usually designed for 16S species references; verify ITS suitability")
+  species_path <- normalizePath(opt$species_fasta, mustWork = TRUE)
+  taxa <- dada2::addSpecies(taxa, species_path, tryRC = !isTRUE(opt$no_try_rc))
 }
 
-# Keep expected ranks only (if present)
-keep <- intersect(expected_ranks, colnames(taxa))
-if (length(keep) == 0) stop("No expected taxonomy ranks present in taxonomy result.")
+tax_character <- as.matrix(taxa)
+tax_character[is.na(tax_character)] <- ""
+collapsed <- apply(tax_character, 1L, function(row) paste(row[nzchar(row)], collapse = delimiter))
+counts <- as.data.frame(t(seqtab), check.names = FALSE)
+output <- data.frame(ASV = paste0("ASV", seq_len(nrow(counts))),
+                     Sequence = rownames(counts), Taxonomy = unname(collapsed),
+                     taxa, counts, check.names = FALSE, stringsAsFactors = FALSE)
 
-# Build a data.frame: ASV + collapsed Taxonomy
-tax_df <- as.data.frame(taxa[, keep, drop = FALSE], stringsAsFactors = FALSE)
-tax_df$ASV <- rownames(taxa)
-
-# Fast vectorized collapse of ranks per ASV; remove empty/NA levels before joining
-collapse_tax <- function(m, delim = ";") {
-    # m is a character matrix of ranks, rows = ASV, cols = ranks
-    m[is.na(m) | m == ""] <- NA
-    # Apply over rows without creating row-wise groups (faster than rowwise())
-    vapply(seq_len(nrow(m)), function(i) {
-        x <- m[i, ]
-        x <- x[!is.na(x)]
-        if (length(x) == 0) "" else paste(x, collapse = delim)
-    }, FUN.VALUE = character(1))
-}
-tax_df$Taxonomy <- collapse_tax(as.matrix(tax_df[, keep, drop = FALSE]), delim = tax_delim)
-
-tax_df <- tax_df[, c("ASV", "Taxonomy"), drop = FALSE]
-
-# --------------------------- Assemble output -----------------------------------
-# Convert count matrix (ASV rows × sample cols) to data.frame
-asv_df <- as.data.frame(count_mat, check.names = FALSE) |>
-    rownames_to_column(var = "ASV")
-
-# Right-join to keep all ASVs even if taxonomy is empty
-out_df <- tax_df |>
-    right_join(asv_df, by = "ASV")
-
-# Ensure 'Taxonomy' exists and is character; replace NA with empty string
-if (!"Taxonomy" %in% names(out_df)) out_df$Taxonomy <- ""
-out_df$Taxonomy[is.na(out_df$Taxonomy)] <- ""
-
-# Final column order: ASV, Taxonomy, <samples in original order>
-out_df <- out_df |>
-    select(c("ASV", "Taxonomy", sample_cols))
-
-# --------------------------- Write ---------------------------------------------
-# Avoid scientific notation; keep large strings intact
-options(scipen = 999)
-
-# readr::write_csv preserves column order and UTF-8; counts will be written as integers
-readr::write_csv(out_df, opt$output_csv)
-
-message("Done. Wrote: ", opt$output_csv)
+output_path <- opt$output
+output_dir <- dirname(output_path)
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+separator <- if (grepl("\\.csv$", output_path, ignore.case = TRUE)) "," else "\t"
+write.table(output, output_path, sep = separator, quote = separator == ",",
+            row.names = FALSE, na = "")
+message("Wrote ", nrow(output), " ASVs × ", ncol(seqtab), " samples: ", output_path)

@@ -1,113 +1,102 @@
 #!/usr/bin/env bash
-# split_by_segment.sh — split mixed FASTQ into R1/R2 by header segment, with optional gzip output
 
-set -euo pipefail
+# Split an interleaved/mixed FASTQ using a delimited field in the read ID.
 
-# Function to show usage message
+set -Eeuo pipefail
+
+INPUT=""
+R1_OUT="reads_R1.fastq.gz"
+R2_OUT="reads_R2.fastq.gz"
+DELIMITER='[.]'
+FIELD=3
+R1_VALUE=1
+R2_VALUE=2
+FORCE=false
+
 usage() {
-  cat <<EOF >&2
-Usage: $(basename "$0") -i INPUT [-1 R1_OUT] [-2 R2_OUT] [-h]
+  cat <<'EOF'
+Usage: split_fq12.sh -i FASTQ [options]
 
-  -i FILE    path to mixed FASTQ (can be .gz)
-  -1 FILE    output path for R1 reads (default: reads_R1.fastq or .gz if you include .gz)
-  -2 FILE    output path for R2 reads (default: reads_R2.fastq or .gz if you include .gz)
-  -h         display this help and exit
+Options:
+  -i, --input FILE       Mixed/interleaved FASTQ; .gz is detected by suffix (required)
+  -1, --r1-out FILE      R1 output (default: reads_R1.fastq.gz)
+  -2, --r2-out FILE      R2 output (default: reads_R2.fastq.gz)
+      --delimiter REGEX  awk split regex for first header token (default: [.])
+      --field INT        1-based split field holding the mate label (default: 3)
+      --r1-value STR     Field value identifying R1 (default: 1)
+      --r2-value STR     Field value identifying R2 (default: 2)
+      --force            Replace existing output files
+  -h, --help             Show this help
 
-If R1_OUT or R2_OUT ends with .gz, the script will gzip-compress that output.
+The input must contain complete four-line FASTQ records. Unknown mate labels are
+counted and skipped. Output compression is selected independently by each .gz suffix.
 EOF
 }
 
-# Default output filenames
-r1_out="reads_R1.fastq"
-r2_out="reads_R2.fastq"
-
-# Parse command-line options
-infile=""
-while getopts "i:1:2:h" opt; do
-  case "$opt" in
-    i) infile="$OPTARG" ;;
-    1) r1_out="$OPTARG" ;;
-    2) r2_out="$OPTARG" ;;
-    h) usage; exit 0 ;;
-    *) usage; exit 1 ;;
+parsed="$(getopt -o i:1:2:h -l input:,r1-out:,r2-out:,delimiter:,field:,r1-value:,r2-value:,force,help -- "$@")" || { usage >&2; exit 2; }
+eval "set -- $parsed"
+while true; do
+  case "$1" in
+    -i|--input) INPUT="$2"; shift 2 ;;
+    -1|--r1-out) R1_OUT="$2"; shift 2 ;;
+    -2|--r2-out) R2_OUT="$2"; shift 2 ;;
+    --delimiter) DELIMITER="$2"; shift 2 ;;
+    --field) FIELD="$2"; shift 2 ;;
+    --r1-value) R1_VALUE="$2"; shift 2 ;;
+    --r2-value) R2_VALUE="$2"; shift 2 ;;
+    --force) FORCE=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
   esac
 done
-
-# Verify input file was provided
-if [[ -z "$infile" ]]; then
-  echo "Error: input file is required." >&2
-  usage
-  exit 1
+[[ $# -eq 0 ]] || { echo "Unexpected arguments: $*" >&2; exit 2; }
+[[ -f "$INPUT" ]] || { echo "Input FASTQ not found: $INPUT" >&2; exit 2; }
+[[ "$FIELD" =~ ^[1-9][0-9]*$ ]] || { echo "--field must be >= 1" >&2; exit 2; }
+[[ "$R1_OUT" != "$R2_OUT" ]] || { echo "R1 and R2 outputs must differ" >&2; exit 2; }
+[[ "$INPUT" != "$R1_OUT" && "$INPUT" != "$R2_OUT" ]] || { echo "Outputs must differ from input" >&2; exit 2; }
+if [[ "$FORCE" == false && ( -e "$R1_OUT" || -e "$R2_OUT" ) ]]; then
+  echo "Output exists; pass --force to replace it" >&2
+  exit 2
 fi
 
-# Prepare (empty) output files or set up gzip pipes
-# If file ends with .gz, we'll pipe through gzip; otherwise truncate/create normally.
-if [[ "$r1_out" == *.gz ]]; then
-  : > /dev/null  # just ensure script doesn't error
-  r1_pipe="gzip > \"$r1_out\""
-  r1_mode="pipe"
-else
-  : > "$r1_out"
-  r1_pipe="$r1_out"
-  r1_mode="file"
-fi
+temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/amplicon-split.XXXXXX")"
+trap 'rm -rf -- "$temp_dir"' EXIT
+temp_r1="$temp_dir/r1.fastq"
+temp_r2="$temp_dir/r2.fastq"
+counts="$temp_dir/counts.tsv"
 
-if [[ "$r2_out" == *.gz ]]; then
-  : > /dev/null
-  r2_pipe="gzip > \"$r2_out\""
-  r2_mode="pipe"
-else
-  : > "$r2_out"
-  r2_pipe="$r2_out"
-  r2_mode="file"
-fi
-
-# Choose read command based on input extension
-if [[ "$infile" == *.gz ]]; then
-  read_cmd="gzip -dc \"$infile\""
-else
-  read_cmd="cat \"$infile\""
-fi
-
-# Process FASTQ records (4 lines each) and write to appropriate outputs
-eval "$read_cmd" | awk -v R1="$r1_pipe" -v M1="$r1_mode" \
-                     -v R2="$r2_pipe" -v M2="$r2_mode" '
-  BEGIN {
-    # nothing to do
+if [[ "$INPUT" == *.gz ]]; then reader=(gzip -dc -- "$INPUT"); else reader=(cat -- "$INPUT"); fi
+"${reader[@]}" | awk -v r1="$temp_r1" -v r2="$temp_r2" -v counts="$counts" \
+  -v delim="$DELIMITER" -v field="$FIELD" -v one="$R1_VALUE" -v two="$R2_VALUE" '
+  BEGIN { n1=0; n2=0; unknown=0; invalid=0 }
+  {
+    header=$0
+    if ((getline sequence) <= 0 || (getline plus) <= 0 || (getline quality) <= 0) { invalid=1; exit }
+    if (substr(header,1,1)!="@" || substr(plus,1,1)!="+" || length(sequence)!=length(quality)) { invalid=1; exit }
+    split(header, tokens, /[[:space:]]+/)
+    n=split(tokens[1], parts, delim)
+    label=(field <= n ? parts[field] : "")
+    record=header ORS sequence ORS plus ORS quality
+    if (label==one) { print record >> r1; n1++ }
+    else if (label==two) { print record >> r2; n2++ }
+    else { unknown++ }
   }
-  NR % 4 == 1 {
-    header = $0
-    # split first field by ".", take third element as segment index
-    split($1, parts, "\\.")
-    segment = parts[3]
-    # read the rest of the FASTQ record
-    getline seq
-    getline plus
-    getline qual
-
-    # choose output based on segment
-    if (segment == "1") {
-      if (M1 == "pipe") {
-        print header ORS seq ORS plus ORS qual | R1
-      } else {
-        print header ORS seq ORS plus ORS qual >> R1
-      }
-    }
-    else if (segment == "2") {
-      if (M2 == "pipe") {
-        print header ORS seq ORS plus ORS qual | R2
-      } else {
-        print header ORS seq ORS plus ORS qual >> R2
-      }
-    }
-  }
-  END {
-    # close gzip pipes if used
-    if (M1 == "pipe") close(R1)
-    if (M2 == "pipe") close(R2)
-  }
+  END { close(r1); close(r2); print "r1\t" n1 > counts; print "r2\t" n2 >> counts; print "unknown\t" unknown >> counts; print "invalid\t" invalid >> counts }
 '
 
-echo "Done splitting:"
-echo "  R1 → $r1_out"
-echo "  R2 → $r2_out"
+invalid="$(awk -F '\t' '$1=="invalid"{print $2}' "$counts")"
+[[ "$invalid" == 0 ]] || { echo "Invalid or truncated FASTQ record" >&2; exit 1; }
+[[ -e "$temp_r1" ]] || : > "$temp_r1"
+[[ -e "$temp_r2" ]] || : > "$temp_r2"
+
+write_output() {
+  local source="$1" destination="$2" temp_output
+  temp_output="$destination.tmp.$$"
+  mkdir -p -- "$(dirname -- "$destination")"
+  if [[ "$destination" == *.gz ]]; then gzip -c -- "$source" > "$temp_output"; else cp -- "$source" "$temp_output"; fi
+  mv -f -- "$temp_output" "$destination"
+}
+write_output "$temp_r1" "$R1_OUT"
+write_output "$temp_r2" "$R2_OUT"
+cat "$counts"
+printf 'Wrote: %s and %s\n' "$R1_OUT" "$R2_OUT"

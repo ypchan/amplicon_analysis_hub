@@ -1,262 +1,233 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Train a local hierarchical multilabel classifier with K-fold cross-validation
-and export confusion matrices (per-label and micro-averaged).
+"""Train and cross-validate a hierarchical multilabel metadata classifier."""
 
-Inputs:
-  - train.parquet   columns: text (str), labels (list[str] or comma-separated leaf IDs)
-  - ontology_edges.tsv  columns: child_id  parent_id  axis   (used only to save for later closure)
+from __future__ import annotations
 
-Outputs (artifacts/):
-  - label_binarizer.joblib
-  - clf.joblib                  (OvR LogisticRegression fitted on FULL data for deployment)
-  - thresholds.json             (per-label decision thresholds learned on FULL data)
-  - embedder_name.txt
-  - parent_map.json
-  - metrics_cv.json             (per-fold and averaged metrics)
-  - confusion_per_label.tsv     (columns: label, TP, FP, FN, TN)
-  - confusion_micro.json        (TP, FP, FN, TN for micro-averaging)
-"""
-
-import os, json, math, argparse, joblib
-import numpy as np
-import pandas as pd
+import argparse
+import ast
+import json
+import sys
 from pathlib import Path
-from tqdm import tqdm
+from typing import Any
 
-from sklearn.model_selection import KFold
-from sklearn.preprocessing import MultiLabelBinarizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    average_precision_score, f1_score, precision_recall_curve
-)
+VERSION = "2.0.0"
 
-from sentence_transformers import SentenceTransformer
 
-# ------------------------ IO helpers ------------------------
+def parse_labels(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set, np.ndarray)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return []
+    text = str(value).strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            parsed = ast.literal_eval(text)
+            if isinstance(parsed, (list, tuple, set)):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except (SyntaxError, ValueError):
+            pass
+    return [item.strip() for item in text.split(",") if item.strip()]
 
-def load_df(path: str) -> pd.DataFrame:
-    df = pd.read_parquet(path)
-    # normalize labels to list[str]
-    if df['labels'].dtype == object:
-        def to_list(x):
-            if isinstance(x, list): return [str(i) for i in x]
-            s = str(x).strip()
-            if s.startswith('['):
-                import ast
-                try:
-                    v = ast.literal_eval(s)
-                    return [str(i).strip() for i in v]
-                except Exception:
-                    pass
-            if s == '' or s.lower() == 'nan':
-                return []
-            return [i.strip() for i in s.split(',') if i.strip()]
-        df['labels'] = df['labels'].apply(to_list)
-    return df
 
-def load_parent_map(path: str):
-    pm = {}
-    df = pd.read_csv(path, sep='\t', header=None, names=['child','parent','axis'])
-    for _, r in df.iterrows():
-        pm.setdefault(r['child'], set()).add(r['parent'])
-    return {k: sorted(v) for k, v in pm.items()}
+def load_parent_map(path: Path) -> dict[str, list[str]]:
+    frame = pd.read_csv(path, sep="\t", comment="#", dtype=str)
+    lowered = {column.lower(): column for column in frame.columns}
+    if "child_id" in lowered and "parent_id" in lowered:
+        child_col, parent_col = lowered["child_id"], lowered["parent_id"]
+    elif "child" in lowered and "parent" in lowered:
+        child_col, parent_col = lowered["child"], lowered["parent"]
+    else:
+        frame = pd.read_csv(path, sep="\t", comment="#", header=None, dtype=str)
+        if frame.shape[1] < 2:
+            raise ValueError("ontology needs child and parent columns")
+        child_col, parent_col = frame.columns[:2]
+    mapping: dict[str, set[str]] = {}
+    for child, parent in frame[[child_col, parent_col]].itertuples(index=False, name=None):
+        if pd.notna(child) and pd.notna(parent):
+            mapping.setdefault(str(child), set()).add(str(parent))
+    return {child: sorted(parents) for child, parents in mapping.items()}
 
-# ------------------------ model / metrics ------------------------
 
-def torch_cuda():
-    try:
-        import torch
-        return torch.cuda.is_available()
-    except Exception:
-        return False
+def predict_probabilities(model: OneVsRestClassifier, features: np.ndarray) -> np.ndarray:
+    probabilities = model.predict_proba(features)
+    if isinstance(probabilities, list):
+        probabilities = np.column_stack([column[:, 1] for column in probabilities])
+    return np.asarray(probabilities, dtype=np.float64)
 
-def build_embedder(name: str, batch: int, use_cuda: bool):
-    model = SentenceTransformer(name, device=('cuda' if use_cuda else 'cpu'))
-    def encode(texts):
-        return model.encode(
-            texts, batch_size=batch,
-            normalize_embeddings=True,  # for cosine/IP use
-            show_progress_bar=True
-        )
-    return encode
 
-def find_thresholds(y_true: np.ndarray, y_proba: np.ndarray, class_names, target_precision=0.9):
-    """Pick per-class thresholds aiming at given precision on validation data."""
-    thresholds = {}
-    for j, lbl in enumerate(class_names):
-        yt = y_true[:, j]
-        yp = y_proba[:, j]
-        if yt.sum() == 0:
-            thresholds[lbl] = 0.5
+def choose_thresholds(
+    truth: np.ndarray,
+    probabilities: np.ndarray,
+    classes: list[str],
+    target_precision: float,
+) -> dict[str, float]:
+    thresholds: dict[str, float] = {}
+    for index, label in enumerate(classes):
+        y_true, y_score = truth[:, index], probabilities[:, index]
+        if y_true.sum() == 0:
+            thresholds[label] = 1.0
             continue
-        prec, rec, thr = precision_recall_curve(yt, yp)
-        chosen = None
-        for p, t in zip(prec[:-1], thr):  # last prec has no threshold
-            if p >= target_precision:
-                chosen = float(t); break
-        thresholds[lbl] = float(chosen) if chosen is not None else float(np.quantile(yp, 0.95))
+        precision, recall, candidates = precision_recall_curve(y_true, y_score)
+        eligible = np.flatnonzero(precision[:-1] >= target_precision)
+        if eligible.size:
+            best = eligible[np.argmax(recall[eligible])]
+            thresholds[label] = float(candidates[best])
+        else:
+            f1 = 2 * precision[:-1] * recall[:-1] / np.maximum(precision[:-1] + recall[:-1], 1e-12)
+            thresholds[label] = float(candidates[int(np.argmax(f1))]) if candidates.size else 0.5
     return thresholds
 
-def apply_thresholds(y_proba: np.ndarray, class_names, thresholds: dict) -> np.ndarray:
-    thr = np.array([thresholds.get(lbl, 0.5) for lbl in class_names], dtype=float)
-    return (y_proba >= thr).astype(bool)
 
-def confusion_counts(y_true_bin: np.ndarray, y_pred_bin: np.ndarray):
-    """
-    Per-label confusion counts for multilabel: returns arrays (TP, FP, FN, TN) with shape (n_labels,)
-    and micro totals (scalars).
-    """
-    tp = np.sum((y_true_bin == 1) & (y_pred_bin == 1), axis=0)
-    fp = np.sum((y_true_bin == 0) & (y_pred_bin == 1), axis=0)
-    fn = np.sum((y_true_bin == 1) & (y_pred_bin == 0), axis=0)
-    tn = np.sum((y_true_bin == 0) & (y_pred_bin == 0), axis=0)
-    micro = {
-        'TP': int(tp.sum()),
-        'FP': int(fp.sum()),
-        'FN': int(fn.sum()),
-        'TN': int(tn.sum()),
-    }
-    return tp.astype(int), fp.astype(int), fn.astype(int), tn.astype(int), micro
+def confusion(truth: np.ndarray, predicted: np.ndarray) -> tuple[pd.DataFrame, dict[str, int]]:
+    tp = ((truth == 1) & predicted).sum(axis=0)
+    fp = ((truth == 0) & predicted).sum(axis=0)
+    fn = ((truth == 1) & ~predicted).sum(axis=0)
+    tn = ((truth == 0) & ~predicted).sum(axis=0)
+    table = pd.DataFrame({"TP": tp, "FP": fp, "FN": fn, "TN": tn})
+    totals = {name: int(values.sum()) for name, values in (("TP", tp), ("FP", fp), ("FN", fn), ("TN", tn))}
+    return table, totals
 
-# ------------------------ main ------------------------
 
-def main(args):
-    os.makedirs('artifacts', exist_ok=True)
-
-    # 1) Load data
-    df = load_df(args.train)
-    texts = df['text'].astype(str).tolist()
-
-    # 2) Label binarizer (fit on ALL data to fix label space)
-    mlb = MultiLabelBinarizer()
-    Y = mlb.fit_transform(df['labels'])
-    class_names = mlb.classes_.tolist()
-
-    # 3) Embed all texts ONCE to reuse across folds
-    encode = build_embedder(args.embedder, batch=args.batch, use_cuda=(args.cuda and torch_cuda()))
-    X = encode(texts).astype('float32')  # (N, D)
-
-    # 4) K-fold CV
-    kf = KFold(n_splits=args.cv, shuffle=True, random_state=42)
-    fold_metrics = []
-    # For confusion aggregation
-    agg_tp = np.zeros(len(class_names), dtype=int)
-    agg_fp = np.zeros(len(class_names), dtype=int)
-    agg_fn = np.zeros(len(class_names), dtype=int)
-    agg_tn = np.zeros(len(class_names), dtype=int)
-
-    fold_id = 0
-    for train_idx, val_idx in kf.split(X):
-        fold_id += 1
-        X_tr, X_va = X[train_idx], X[val_idx]
-        Y_tr, Y_va = Y[train_idx], Y[val_idx]
-
-        clf = LogisticRegression(
-            penalty='l2', C=1.0, solver='saga',
-            max_iter=2000, n_jobs=args.workers, verbose=0
-        )
-        clf.fit(X_tr, Y_tr)
-
-        # predict_proba returns list for multilabel OvR
-        Yp_list = clf.predict_proba(X_va)
-        if isinstance(Yp_list, list):
-            Yp = np.column_stack([p[:,1] for p in Yp_list])
-        else:
-            Yp = Yp_list  # already (n,k)
-
-        micro_aupr = average_precision_score(Y_va, Yp, average='micro')
-        macro_aupr = average_precision_score(Y_va, Yp, average='macro')
-
-        # choose thresholds ON THIS FOLD's val
-        thr = find_thresholds(Y_va, Yp, class_names, target_precision=args.target_precision)
-        Yhat = apply_thresholds(Yp, class_names, thr)
-
-        micro_f1 = f1_score(Y_va, Yhat, average='micro', zero_division=0)
-        macro_f1 = f1_score(Y_va, Yhat, average='macro', zero_division=0)
-
-        # confusion for aggregation
-        tp, fp, fn, tn, micro = confusion_counts(Y_va, Yhat)
-        agg_tp += tp; agg_fp += fp; agg_fn += fn; agg_tn += tn
-
-        fold_metrics.append({
-            'fold': fold_id,
-            'n_train': int(len(train_idx)),
-            'n_val': int(len(val_idx)),
-            'micro_aupr': float(micro_aupr),
-            'macro_aupr': float(macro_aupr),
-            'micro_f1@thr': float(micro_f1),
-            'macro_f1@thr': float(macro_f1),
-        })
-        print(f"[Fold {fold_id}] micro AUPRC={micro_aupr:.4f} macro AUPRC={macro_aupr:.4f} | micro F1={micro_f1:.4f} macro F1={macro_f1:.4f}")
-
-    # 5) Aggregate CV metrics
-    def avg(key): return float(np.mean([m[key] for m in fold_metrics]))
-    metrics_cv = {
-        'folds': fold_metrics,
-        'avg_micro_aupr': avg('micro_aupr'),
-        'avg_macro_aupr': avg('macro_aupr'),
-        'avg_micro_f1@thr': avg('micro_f1@thr'),
-        'avg_macro_f1@thr': avg('macro_f1@thr'),
-        'n_labels': len(class_names),
-        'cv': args.cv,
-        'target_precision_for_thr': args.target_precision
-    }
-
-    # 6) Save per-label confusion table (summed over folds)
-    conf_df = pd.DataFrame({
-        'label': class_names,
-        'TP': agg_tp, 'FP': agg_fp, 'FN': agg_fn, 'TN': agg_tn
-    })
-    conf_df.to_csv('artifacts/confusion_per_label.tsv', sep='\t', index=False)
-
-    micro_totals = {
-        'TP': int(agg_tp.sum()),
-        'FP': int(agg_fp.sum()),
-        'FN': int(agg_fn.sum()),
-        'TN': int(agg_tn.sum()),
-    }
-    with open('artifacts/confusion_micro.json','w') as f:
-        json.dump(micro_totals, f, indent=2)
-
-    with open('artifacts/metrics_cv.json','w') as f:
-        json.dump(metrics_cv, f, indent=2)
-
-    # 7) Fit FINAL model on FULL data, choose thresholds on FULL data
-    clf_full = LogisticRegression(
-        penalty='l2', C=1.0, solver='saga',
-        max_iter=2000, n_jobs=args.workers, verbose=0
+def model_factory(args: argparse.Namespace) -> OneVsRestClassifier:
+    estimator = LogisticRegression(
+        penalty="l2", C=args.regularization_c, solver="liblinear",
+        max_iter=args.max_iter, random_state=args.seed,
     )
-    clf_full.fit(X, Y)
-    Yp_full_list = clf_full.predict_proba(X)
-    if isinstance(Yp_full_list, list):
-        Yp_full = np.column_stack([p[:,1] for p in Yp_full_list])
-    else:
-        Yp_full = Yp_full_list
-    thresholds_full = find_thresholds(Y, Yp_full, class_names, target_precision=args.target_precision)
+    return OneVsRestClassifier(estimator, n_jobs=args.workers)
 
-    # 8) Save artifacts for deployment / batch inference
-    joblib.dump(mlb, 'artifacts/label_binarizer.joblib')
-    joblib.dump(clf_full, 'artifacts/clf.joblib')
-    with open('artifacts/thresholds.json','w') as f: json.dump(thresholds_full, f, indent=2)
-    with open('artifacts/embedder_name.txt','w') as f: f.write(args.embedder + '\n')
 
-    # parent map saved for later hierarchical closure (inference stage)
-    parent_map = load_parent_map(args.ontology)
-    with open('artifacts/parent_map.json','w') as f: json.dump(parent_map, f)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("--train", type=Path, default=Path("train.parquet"), help="Parquet with text and labels columns")
+    parser.add_argument("--ontology", type=Path, default=Path("ontology_edges.tsv"), help="TSV child-parent edges")
+    parser.add_argument("--artifacts-dir", type=Path, default=Path("artifacts"), help="Model output directory")
+    parser.add_argument("--text-col", default="text", help="Training text column")
+    parser.add_argument("--labels-col", default="labels", help="List or comma-separated label column")
+    parser.add_argument("--embedder", default="intfloat/multilingual-e5-base", help="SentenceTransformer model")
+    parser.add_argument("--batch", type=int, default=256, help="Embedding batch size")
+    parser.add_argument("--workers", type=int, default=4, help="Parallel one-vs-rest estimators")
+    parser.add_argument("--cuda", action="store_true", help="Use CUDA when torch reports it available")
+    parser.add_argument("--cv", type=int, default=5, help="Cross-validation folds")
+    parser.add_argument("--target-precision", "--target_precision", dest="target_precision", type=float, default=0.90,
+                        help="Per-label precision target for OOF thresholds")
+    parser.add_argument("--regularization-c", type=float, default=1.0, help="Logistic-regression inverse regularization")
+    parser.add_argument("--max-iter", type=int, default=2000, help="Maximum logistic-regression iterations")
+    parser.add_argument("--seed", type=int, default=42, help="Reproducible CV/model seed")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    args = parser.parse_args()
+    if not args.train.is_file() or not args.ontology.is_file():
+        parser.error("--train and --ontology must exist")
+    if args.batch < 1 or args.workers < 1 or args.cv < 2 or args.max_iter < 1:
+        parser.error("batch/workers/max-iter must be positive and cv must be >= 2")
+    if not 0 < args.target_precision <= 1 or args.regularization_c <= 0:
+        parser.error("--target-precision must be in (0,1] and --regularization-c must be > 0")
+    return args
 
-    print("Saved artifacts/ : metrics_cv.json, confusion_per_label.tsv, confusion_micro.json, model & thresholds.")
+
+def main() -> int:
+    args = parse_args()
+    global joblib, np, pd, SentenceTransformer, LogisticRegression
+    global average_precision_score, f1_score, precision_recall_curve
+    global KFold, OneVsRestClassifier, MultiLabelBinarizer
+    try:
+        import joblib
+        import numpy as np
+        import pandas as pd
+        from sentence_transformers import SentenceTransformer
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.metrics import average_precision_score, f1_score, precision_recall_curve
+        from sklearn.model_selection import KFold
+        from sklearn.multiclass import OneVsRestClassifier
+        from sklearn.preprocessing import MultiLabelBinarizer
+    except ImportError as error:
+        print(f"error: optional ontology dependency is missing: {error}", file=sys.stderr)
+        return 127
+    frame = pd.read_parquet(args.train, columns=[args.text_col, args.labels_col])
+    if len(frame) < args.cv:
+        print("error: number of rows must be >= --cv", file=sys.stderr)
+        return 2
+    frame[args.labels_col] = frame[args.labels_col].map(parse_labels)
+    if not frame[args.labels_col].map(bool).any():
+        print("error: training data contains no labels", file=sys.stderr)
+        return 2
+
+    binarizer = MultiLabelBinarizer()
+    truth = binarizer.fit_transform(frame[args.labels_col])
+    classes = binarizer.classes_.tolist()
+    if len(classes) < 2:
+        print("error: at least two ontology labels are required", file=sys.stderr)
+        return 2
+
+    device = "cpu"
+    if args.cuda:
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            pass
+    embedder = SentenceTransformer(args.embedder, device=device)
+    features = embedder.encode(
+        frame[args.text_col].fillna("").astype(str).tolist(),
+        batch_size=args.batch, normalize_embeddings=True,
+        show_progress_bar=True,
+    ).astype(np.float32, copy=False)
+
+    splitter = KFold(n_splits=args.cv, shuffle=True, random_state=args.seed)
+    oof = np.zeros_like(truth, dtype=np.float64)
+    fold_metrics: list[dict[str, float | int]] = []
+    for fold, (train_index, validation_index) in enumerate(splitter.split(features), start=1):
+        model = model_factory(args)
+        model.fit(features[train_index], truth[train_index])
+        probabilities = predict_probabilities(model, features[validation_index])
+        oof[validation_index] = probabilities
+        fold_metrics.append({
+            "fold": fold,
+            "n_train": int(len(train_index)),
+            "n_validation": int(len(validation_index)),
+            "micro_auprc": float(average_precision_score(truth[validation_index], probabilities, average="micro")),
+        })
+        print(f"fold {fold}/{args.cv}: micro AUPRC={fold_metrics[-1]['micro_auprc']:.4f}")
+
+    thresholds = choose_thresholds(truth, oof, classes, args.target_precision)
+    threshold_array = np.array([thresholds[label] for label in classes])
+    predicted = oof >= threshold_array
+    confusion_table, micro_confusion = confusion(truth, predicted)
+    confusion_table.insert(0, "label", classes)
+    metrics = {
+        "version": VERSION,
+        "rows": int(len(frame)),
+        "labels": len(classes),
+        "folds": fold_metrics,
+        "oof_micro_auprc": float(average_precision_score(truth, oof, average="micro")),
+        "oof_macro_auprc": float(average_precision_score(truth, oof, average="macro")),
+        "oof_micro_f1": float(f1_score(truth, predicted, average="micro", zero_division=0)),
+        "oof_macro_f1": float(f1_score(truth, predicted, average="macro", zero_division=0)),
+        "target_precision": args.target_precision,
+        "embedder": args.embedder,
+        "device": device,
+        "seed": args.seed,
+    }
+
+    final_model = model_factory(args)
+    final_model.fit(features, truth)
+    args.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    joblib.dump(binarizer, args.artifacts_dir / "label_binarizer.joblib")
+    joblib.dump(final_model, args.artifacts_dir / "clf.joblib")
+    (args.artifacts_dir / "thresholds.json").write_text(json.dumps(thresholds, indent=2, sort_keys=True), encoding="utf-8")
+    (args.artifacts_dir / "embedder_name.txt").write_text(args.embedder + "\n", encoding="utf-8")
+    (args.artifacts_dir / "parent_map.json").write_text(
+        json.dumps(load_parent_map(args.ontology), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    (args.artifacts_dir / "metrics_cv.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    (args.artifacts_dir / "confusion_micro.json").write_text(json.dumps(micro_confusion, indent=2), encoding="utf-8")
+    confusion_table.to_csv(args.artifacts_dir / "confusion_per_label.tsv", sep="\t", index=False)
+    print(f"Saved model and out-of-fold metrics: {args.artifacts_dir}")
+    return 0
+
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument('--train', default='train.parquet')
-    p.add_argument('--ontology', default='ontology_edges.tsv')
-    p.add_argument('--embedder', default='intfloat/multilingual-e5-base')
-    p.add_argument('--batch', type=int, default=2048)
-    p.add_argument('--workers', type=int, default=8)
-    p.add_argument('--cuda', action='store_true')
-    p.add_argument('--cv', type=int, default=5)
-    p.add_argument('--target_precision', type=float, default=0.9)
-    args = p.parse_args()
-    main(args)
+    raise SystemExit(main())

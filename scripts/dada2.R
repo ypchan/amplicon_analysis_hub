@@ -1,498 +1,429 @@
 #!/usr/bin/env Rscript
 
-# ------------------------------------------------------------
-# DADA2 Amplicon Processing Pipeline (PE or SE mode)
-# Author: yanpengch@qq.com
-# Refactor: function-based, unified logging, PE->SE suggestion
-# Date: 2025-09-07 (last update)
-# Usage:
-#   dada2.R -i <input_dir> -o <output_dir> -m pe|se [options]
-# Description:
-#   Processes Illumina paired-end or single-end amplicon reads
-#   using the DADA2 pipeline, generating ASV tables and taxonomy.
-# ------------------------------------------------------------
+# DADA2 engine for amplicon_analysis_hub.
+#
+# Defaults are selected from a marker/platform profile, but every biologically
+# important filter and inference setting can be overridden. Resolved settings
+# are always recorded in effective_parameters.tsv.
 
 suppressPackageStartupMessages({
   library(getopt)
-  library(dada2)
-  library(Biostrings)
 })
 
-# -------------------------------
-# Usage / CLI
-# -------------------------------
-print_usage <- function() {
-  cat("
-DADA2 Amplicon Processing Pipeline
-==================================
+VERSION <- "2.0.0"
+SUPPORTED_MARKERS <- c("16s", "its", "other")
+SUPPORTED_PLATFORMS <- c("illumina", "mgi", "element", "aviti", "iontorrent",
+                         "454", "pacbio_ccs", "nanopore")
 
-Usage:
-  dada2.R -i <input_dir> -o <output_dir> -m pe|se [options]
-
-Required:
-  -i, --input_dir       Directory of input FASTQ files
-  -o, --output_dir      Directory to write all outputs
-  -m, --mode            Processing mode: pe or se
-
-Options:
-  -1, --reads1_suffix   Forward read suffix (default: _1.fastq.gz)
-  -2, --reads2_suffix   Reverse read suffix (default: _2.fastq.gz; PE only)
-  -t, --threads         Number of threads (default: 4)
-  -P, --platform        Platform: illumina, 454, or iontorrent (default: illumina)
-  -c, --classifier      Path to taxonomy classifier FASTA
-  -f, --truncLengthf    Truncate forward reads at this length (default: 0, no truncation)
-  -r, --truncLengthr    Truncate reverse reads at this length (PE only; default: 0, no truncation)
-  -h, --help            Show this help and exit
-
-Output (in <output_dir>):
-  dada2_filtered        Folder of filtered FASTQ files
-  seqtab.nochim.rds     Non-chimera ASV table (RDS)
-  track.summary.tsv     Read counts at each step
-  taxonomy.tsv          Taxonomy assignment (if -c given)
-
-Examples:
-  dada2.R -i 02_cutadapt -o 03_dada2 -m pe -t 24 -1 _1.fastq.gz -2 _2.fastq.gz -P illumina
-  dada2.R -i 02_cutadapt -o 03_dada2 -m se -t 24 -1 .fastq.gz -P illumina
-  # for some bioprojects, error, truncLengthf/r may need to be set, reference seqkit.stat.tsv, set -f 200 -r 160
-  dada2.R -i 02_cutadapt -o 03_dada2 -m pe -t 24 -1 _1.fastq.gz -2 _2.fastq.gz -P illumina -f 200 -r 160
-  dada2.R -i 02_cutadapt -o 03_dada2 -m se -t 24 -1 .fastq.gz -P illumina -f 200
-\n")
+usage <- function(status = 0L) {
+  cat("amplicon_analysis_hub: DADA2 ASV inference\n\n")
+  cat("Usage:\n  dada2.R -i DIR -o DIR [options]\n\n")
+  cat("Required:\n")
+  cat("  -i, --input_dir DIR       Primer-free FASTQ directory\n")
+  cat("  -o, --output_dir DIR      Output directory\n\n")
+  cat("Profile selection:\n")
+  cat("  -m, --mode pe|se          Read layout (default: pe)\n")
+  cat("  -M, --marker NAME         16s|its|other (default: 16s)\n")
+  cat("  -P, --platform NAME       illumina|mgi|element|aviti|iontorrent|454|\n")
+  cat("                            pacbio_ccs|nanopore (default: illumina)\n")
+  cat("      --print_profile       Print resolved defaults and exit\n\n")
+  cat("Input and compute:\n")
+  cat("  -1, --reads1_suffix STR   R1/SE suffix (default: _1.fastq.gz)\n")
+  cat("  -2, --reads2_suffix STR   R2 suffix (default: _2.fastq.gz)\n")
+  cat("  -t, --threads INT         CPU threads (default: 4)\n")
+  cat("      --seed INT            Error-learning seed (default: 100)\n")
+  cat("      --learn_nbases NUM    Error-learning bases (default: 100000000)\n")
+  cat("      --pool MODE           independent|pseudo|true (default: independent)\n")
+  cat("                            pseudo raises rare-ASV sensitivity at ~2x denoise time\n\n")
+  cat("Filtering overrides (profile defaults shown by --print_profile):\n")
+  cat("  -f, --trunc_len_f INT     Fixed R1/SE truncation; 0 keeps full length (default: 0)\n")
+  cat("  -r, --trunc_len_r INT     Fixed R2 truncation; 0 keeps full length (default: 0)\n")
+  cat("      --trim_left INT       Remove leading bases (Ion Torrent default: 15)\n")
+  cat("      --max_ee_f NUM        Maximum expected errors for R1/SE\n")
+  cat("      --max_ee_r NUM        Maximum expected errors for R2\n")
+  cat("      --trunc_q INT         Truncate at first quality <= value\n")
+  cat("      --min_q INT           Reject reads containing quality below value\n")
+  cat("      --min_len INT         Minimum retained length\n")
+  cat("      --max_len INT         Maximum retained length; 0 disables\n\n")
+  cat("Merging, chimera and taxonomy:\n")
+  cat("      --min_overlap INT     Minimum PE overlap (default: 12)\n")
+  cat("      --max_mismatch INT    Maximum overlap mismatches (default: 0)\n")
+  cat("      --chimera METHOD      consensus|pooled|per-sample|none (default: consensus)\n")
+  cat("  -c, --classifier FASTA    DADA2 taxonomy training FASTA (optional)\n")
+  cat("      --min_boot INT        Taxonomy bootstrap cutoff (default: 50)\n")
+  cat("      --no_try_rc           Do not classify reverse complements\n")
+  cat("      --keep_filtered       Keep generated filtered FASTQ files\n")
+  cat("  -h, --help                Show this help\n")
+  cat("  -V, --version             Show version\n\n")
+  cat("Ecological defaults:\n")
+  cat("  short-read 16S: maxEE=2/2, truncQ=2, minLen=100, no fixed truncation\n")
+  cat("  short-read ITS: maxEE=2/2, truncQ=2, minLen=50, no fixed truncation\n")
+  cat("  PacBio CCS 16S: maxEE=3, minQ=3, length=1000..1800, PacBioErrfun\n")
+  cat("  PacBio CCS ITS: maxEE=5, minQ=3, length=100..3000, PacBioErrfun\n")
+  cat("  Nanopore: experimental SE mode; quality ignored by error model\n\n")
+  cat("Examples:\n")
+  cat("  dada2.R -i 02_cutadapt -o 03_dada2 -m pe -M 16s -P illumina\n")
+  cat("  dada2.R -i 02_cutadapt -o 03_dada2 -m pe -M its -P mgi --pool pseudo\n")
+  cat("  dada2.R -i 02_cutadapt -o 03_dada2 -m se -M 16s -P pacbio_ccs -1 .fastq.gz\n")
+  cat("  dada2.R -M its -P pacbio_ccs -m se --print_profile\n")
+  quit(status = status)
 }
 
 spec <- matrix(c(
-  'input_dir',     'i', 1, "character",  'Input FASTQ directory (required)',
-  'output_dir',    'o', 1, "character",  'Output directory (required)',
-  'mode',          'm', 1, "character",  'Processing mode: "pe" or "se" (required)',
-  'reads1_suffix', '1', 1, "character",  'Forward read suffix (default: _1.fastq.gz)',
-  'reads2_suffix', '2', 1, "character",  'Reverse read suffix (PE only, default: _2.fastq.gz)',
-  'threads',       't', 1, "integer",    'CPU threads (default: 4)',
-  'platform',      'P', 1, "character",  'Sequencing platform: illumina|454|iontorrent (default: illumina)',
-  'classifier',    'c', 1, "character",  'Classifier FASTA for taxonomy',
-  'truncLengthf',  'f', 1, "integer",    'Truncate reads after truncLen bases. Reads shorter than this are discarded',
-  'truncLengthr',  'r', 1, "integer",    'Truncate reads after truncLen bases. Reads shorter than this are discarded (PE only)',
-  'help',          'h', 0, "logical",    'Show help and exit'
-), byrow = TRUE, ncol = 5)
+  "input_dir",       "i", 1, "character",
+  "output_dir",      "o", 1, "character",
+  "mode",            "m", 1, "character",
+  "marker",          "M", 1, "character",
+  "platform",        "P", 1, "character",
+  "reads1_suffix",   "1", 1, "character",
+  "reads2_suffix",   "2", 1, "character",
+  "threads",         "t", 1, "integer",
+  "classifier",      "c", 1, "character",
+  "trunc_len_f",     "f", 1, "integer",
+  "trunc_len_r",     "r", 1, "integer",
+  "trim_left",        NA, 1, "integer",
+  "max_ee_f",         NA, 1, "double",
+  "max_ee_r",         NA, 1, "double",
+  "trunc_q",          NA, 1, "integer",
+  "min_q",            NA, 1, "integer",
+  "min_len",          NA, 1, "integer",
+  "max_len",          NA, 1, "integer",
+  "learn_nbases",     NA, 1, "double",
+  "pool",             NA, 1, "character",
+  "seed",             NA, 1, "integer",
+  "min_overlap",      NA, 1, "integer",
+  "max_mismatch",     NA, 1, "integer",
+  "chimera",          NA, 1, "character",
+  "min_boot",         NA, 1, "integer",
+  "no_try_rc",        NA, 0, "logical",
+  "keep_filtered",    NA, 0, "logical",
+  "print_profile",    NA, 0, "logical",
+  "help",            "h", 0, "logical",
+  "version",         "V", 0, "logical"
+), byrow = TRUE, ncol = 4)
 
-opt <- getopt(spec, usage = FALSE)
-if (!is.null(opt$help) || is.null(opt$input_dir) || is.null(opt$output_dir) || is.null(opt$mode)) {
-  print_usage()
-  quit(status = 1)
+opt <- getopt(spec)
+if (isTRUE(opt$help)) usage(0L)
+if (isTRUE(opt$version)) {
+  cat("dada2.R ", VERSION, "\n", sep = "")
+  quit(status = 0L)
 }
 
-# -------------------------------
-# Config / Defaults
-# -------------------------------
-threads        <- ifelse(is.null(opt$threads), 4, opt$threads)
-reads1_suffix  <- ifelse(is.null(opt$reads1_suffix), "_1.fastq.gz", opt$reads1_suffix)
-reads2_suffix  <- ifelse(is.null(opt$reads2_suffix), "_2.fastq.gz", opt$reads2_suffix)
-truncLengthf   <- ifelse(is.null(opt$truncLengthf), 0, opt$truncLengthf)
-truncLengthr   <- ifelse(is.null(opt$truncLengthr), 0, opt$truncLengthr)
-platform       <- tolower(ifelse(is.null(opt$platform), "illumina", opt$platform))
-if (!platform %in% c("illumina", "454", "iontorrent")) stop("Unsupported platform: ", platform)
-
-input_dir   <- sub("/+$", "", opt$input_dir)
-output_dir  <- sub("/+$", "", opt$output_dir)
-mode        <- tolower(opt$mode)
-if (!mode %in% c("se", "pe")) stop("Unsupported mode: ", mode)
-
-# -------------------------------
-# Utilities: time, logging, IO
-# -------------------------------
-ts_now <- function() format(Sys.time(), "%Y-%m-%d %H:%M:%S")
-
-elapsed_time <- function(start_time) {
-  end_time <- Sys.time()
-  elapsed <- as.numeric(difftime(end_time, start_time, units = "secs"))
-  h <- elapsed %/% 3600
-  m <- (elapsed %% 3600) %/% 60
-  s <- round(elapsed %% 60)
-  sprintf("%02d:%02d:%02d", h, m, s)
+normalize_platform <- function(x) {
+  x <- tolower(gsub("[- ]", "_", x))
+  aliases <- c(bgi = "mgi", bgiseq = "mgi", mgiseq = "mgi", dnbseq = "mgi",
+               roche454 = "454", roche_454 = "454", ion_torrent = "iontorrent",
+               pacbio = "pacbio_ccs", ccs = "pacbio_ccs", hifi = "pacbio_ccs",
+               ont = "nanopore", oxford_nanopore = "nanopore")
+  if (x %in% names(aliases)) unname(aliases[[x]]) else x
 }
 
-log_msg <- function(level = "INFO", fmt, ...) {
-  # level: INFO | WARN | ERROR | STEP
-  ts <- format(Sys.time(), "[%Y-%m-%d %H:%M:%S]")
-  msg <- sprintf(fmt, ...)
-  if (level %in% c("WARN", "ERROR")) {
-    message(ts, " [", level, "] ", msg)
-  } else {
-    cat(ts, " [", level, "] ", msg, "\n", sep = "")
-  }
-}
-log_info <- function(fmt, ...) log_msg("INFO", fmt, ...)
-log_warn <- function(fmt, ...) log_msg("WARN", fmt, ...)
-log_step <- function(fmt, ...) log_msg("STEP", fmt, ...)
-log_error<- function(fmt, ...) log_msg("ERROR", fmt, ...)
-
-ensure_dir <- function(d) {
-  if (!dir.exists(d)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
-}
-
-write_and_echo <- function(lines, path) {
-  # Write identical content to file, and echo to stdout
-  ensure_dir(dirname(path))
-  writeLines(lines, con = path)
-  cat(paste(lines, collapse = "\n"), "\n")
-  invisible(path)
-}
-
-# -------------------------------
-# Core helpers
-# -------------------------------
-getN <- function(x) sum(getUniques(x))
-
-build_track_se <- function(filter_out, ddFs, seqtab_nochim, sample_names) {
-  data.frame(
-    input     = filter_out[, "reads.in"],
-    filtered  = filter_out[, "reads.out"],
-    denoised  = sapply(ddFs, getN),
-    nonchim   = rowSums(seqtab_nochim),
-    row.names = sample_names
-  )
-}
-
-build_track_pe <- function(filter_out, denoisedF_counts, denoisedR_counts, mergers, seqtab_nochim, sample_names) {
-  data.frame(
-    input     = filter_out[, "reads.in"],
-    filtered  = filter_out[, "reads.out"],
-    denoisedF = denoisedF_counts,
-    denoisedR = denoisedR_counts,
-    merged    = sapply(mergers, getN),
-    nonchim   = rowSums(seqtab_nochim),
-    row.names = sample_names
-  )
-}
-
-# Suggest switching to SE if many reads fail to merge (PE only)
-suggest_pe2se <- function(track,
-                          out_dir = ".",
-                          ratio_thr = 0.50,   # merged/input threshold
-                          frac_thr  = 0.25,   # fraction threshold to trigger
-                          write_note = TRUE) {
-  # Only meaningful if 'merged' exists
-  if (!("merged" %in% names(track))) return(FALSE)
-
-  input  <- track[["input"]]
-  merged <- track[["merged"]]
-  valid  <- is.finite(input) & input > 0 & is.finite(merged)
-  if (!any(valid)) return(FALSE)
-
-  ratio   <- merged[valid] / input[valid]
-  flags   <- ratio < ratio_thr
-  frac    <- mean(flags, na.rm = TRUE)
-  suggest <- isTRUE(frac >= frac_thr)
-
-  if (write_note && suggest) {
-    content <- c(
-      "    Too many reads failed to merge; consider switching to single-end (se) mode.",
-      sprintf("    Thresholds: merged/input < %.0f%% ; fraction >= %.0f%%", 100*ratio_thr, 100*frac_thr),
-      sprintf("    Triggered samples: %d (%.1f%%)", sum(flags, na.rm = TRUE), 100*frac),
-      sprintf("    Median merged/input: %.1f%%", 100*stats::median(ratio, na.rm = TRUE)),
-      "    Action: re-run in se mode."
-    )
-    write_and_echo(content, file.path(out_dir, "suggestion.pe2se.note"))
-  } else {
-    content <- c(
-      "    PE mode completed successfully; no need to switch to SE mode.",
-      sprintf("    Thresholds: merged/input < %.0f%% ; fraction >= %.0f%%", 100*ratio_thr, 100*frac_thr),
-      sprintf("    Triggered samples: %d (%.1f%%)", sum(flags, na.rm = TRUE), 100*frac),
-      sprintf("    Median merged/input: %.1f%%", 100*stats::median(ratio, na.rm = TRUE)),
-      "    Action: continue with PE results."
-    )
-    write_and_echo(content, file.path(out_dir, "suggestion.is_pe.note"))
-  }
-  return(suggest)
-}
-
-# -------------------------------
-# Input discovery
-# -------------------------------
-discover_inputs <- function(input_dir, reads1_suffix, reads2_suffix, mode) {
-  fastqFs <- list.files(input_dir, pattern = paste0(reads1_suffix, "$"), full.names = TRUE)
-  sample_names <- sub(paste0(reads1_suffix, "$"), "", basename(fastqFs))
-  names(fastqFs) <- sample_names
-  if (mode == "pe") {
-    fastqRs <- file.path(input_dir, paste0(sample_names, reads2_suffix))
-    names(fastqRs) <- sample_names
-  } else {
-    fastqRs <- NULL
-  }
-  list(fastqFs = fastqFs, fastqRs = fastqRs, sample_names = sample_names)
-}
-
-# -------------------------------
-# Filter & Trim
-# -------------------------------
-filter_and_trim_se <- function(fastqFs, filtFs, platform, threads,
-                               failed_sample_lst) {
-  params <- list(
-    maxN = 0, maxEE = 1, truncQ = 11, rm.phix = TRUE, minLen = 100,
-    compress = FALSE, multithread = threads, verbose = TRUE, n = 1e+08,
-    truncLen = truncLengthf
+profile_defaults <- function(marker, platform, mode) {
+  cfg <- list(
+    marker = marker, platform = platform, mode = mode,
+    max_ee_f = 2, max_ee_r = 2, trunc_q = 2L, min_q = 0L,
+    min_len = if (marker == "16s") 100L else 50L,
+    max_len = 0L, trim_left = 0L, trunc_len_f = 0L, trunc_len_r = 0L,
+    learn_nbases = 1e8, pool = "independent", seed = 100L,
+    min_overlap = 12L, max_mismatch = 0L, chimera = "consensus",
+    error_model = "quality", band_size = 16L,
+    homopolymer_gap_penalty = NA_real_, self_consist = FALSE,
+    rm_phix = platform %in% c("illumina", "mgi", "element", "aviti")
   )
   if (platform == "iontorrent") {
-    filter_out <- do.call(filterAndTrim, c(list(fwd = fastqFs, filt = filtFs), params, list(trimLeft = 15)))
-  } else {
-    filter_out <- do.call(filterAndTrim, c(list(fwd = fastqFs, filt = filtFs), params))
+    cfg$trim_left <- 15L
+    cfg$band_size <- 32L
+    cfg$homopolymer_gap_penalty <- -1
+  } else if (platform == "454") {
+    cfg$band_size <- 32L
+    cfg$homopolymer_gap_penalty <- -1
+  } else if (platform == "pacbio_ccs") {
+    cfg$max_ee_f <- if (marker == "16s") 3 else 5
+    cfg$max_ee_r <- cfg$max_ee_f
+    cfg$trunc_q <- 0L
+    cfg$min_q <- 3L
+    cfg$min_len <- if (marker == "16s") 1000L else 100L
+    cfg$max_len <- if (marker == "16s") 1800L else 3000L
+    cfg$error_model <- "pacbio"
+    cfg$band_size <- 32L
+    cfg$self_consist <- TRUE
+    cfg$rm_phix <- FALSE
+  } else if (platform == "nanopore") {
+    cfg$max_ee_f <- Inf
+    cfg$max_ee_r <- Inf
+    cfg$trunc_q <- 0L
+    cfg$min_len <- if (marker == "16s") 1000L else 100L
+    cfg$max_len <- if (marker == "16s") 1800L else 3000L
+    cfg$error_model <- "noqual"
+    cfg$band_size <- 32L
+    cfg$homopolymer_gap_penalty <- -1
+    cfg$self_consist <- TRUE
+    cfg$rm_phix <- FALSE
   }
+  cfg
+}
 
-  # Drop samples with zero reads after filtering
-  if (any(filter_out[, "reads.out"] == 0)) {
-    failed_fqs     <- rownames(filter_out)[filter_out[, "reads.out"] == 0]
-    failed_samples <- sub("(.fastq|.fastq.gz)$", "", basename(failed_fqs))
-    if (length(failed_samples) > 0) {
-      write.table(failed_samples, file = failed_sample_lst, quote = FALSE, row.names = FALSE, col.names = FALSE)
-      log_warn("Samples removed after filtering: %s", paste(failed_samples, collapse = ", "))
-    }
-    filtFs       <- filtFs[!names(filtFs) %in% failed_samples]
-    filter_out   <- filter_out[!rownames(filter_out) %in% failed_fqs, , drop = FALSE]
+marker <- tolower(if (is.null(opt$marker)) "16s" else opt$marker)
+platform <- normalize_platform(if (is.null(opt$platform)) "illumina" else opt$platform)
+mode <- tolower(if (is.null(opt$mode)) "pe" else opt$mode)
+if (!marker %in% SUPPORTED_MARKERS) stop("--marker must be one of: ", paste(SUPPORTED_MARKERS, collapse = ", "))
+if (!platform %in% SUPPORTED_PLATFORMS) stop("--platform must be one of: ", paste(SUPPORTED_PLATFORMS, collapse = ", "))
+if (!mode %in% c("pe", "se")) stop("--mode must be pe or se")
+if (mode == "pe" && platform %in% c("454", "iontorrent", "pacbio_ccs", "nanopore")) {
+  stop(platform, " is supported only in SE mode by this workflow")
+}
+
+cfg <- profile_defaults(marker, platform, mode)
+override <- function(name) if (!is.null(opt[[name]])) cfg[[name]] <<- opt[[name]]
+for (name in c("trunc_len_f", "trunc_len_r", "trim_left", "max_ee_f", "max_ee_r",
+               "trunc_q", "min_q", "min_len", "max_len", "learn_nbases", "pool",
+               "seed", "min_overlap", "max_mismatch", "chimera")) override(name)
+cfg$pool <- tolower(as.character(cfg$pool))
+cfg$chimera <- tolower(as.character(cfg$chimera))
+if (!cfg$pool %in% c("independent", "pseudo", "true")) stop("--pool must be independent, pseudo, or true")
+if (!cfg$chimera %in% c("consensus", "pooled", "per-sample", "none")) {
+  stop("--chimera must be consensus, pooled, per-sample, or none")
+}
+
+numeric_nonnegative <- c("trunc_len_f", "trunc_len_r", "trim_left", "trunc_q", "min_q",
+                         "min_len", "max_len", "min_overlap", "max_mismatch")
+for (name in numeric_nonnegative) {
+  if (!is.finite(cfg[[name]]) || cfg[[name]] < 0) stop("--", name, " must be non-negative")
+}
+if (cfg$max_len > 0 && cfg$max_len < cfg$min_len) stop("--max_len must be 0 or >= --min_len")
+if (!is.finite(cfg$learn_nbases) || cfg$learn_nbases <= 0) stop("--learn_nbases must be > 0")
+for (name in c("max_ee_f", "max_ee_r")) {
+  if (is.na(cfg[[name]]) || cfg[[name]] <= 0) stop("--", name, " must be > 0 (Inf disables the filter)")
+}
+seed_integer <- suppressWarnings(as.integer(cfg$seed))
+if (!is.finite(cfg$seed) || cfg$seed < 0 || is.na(seed_integer) || cfg$seed != seed_integer) {
+  stop("--seed must be a non-negative integer")
+}
+
+parameter_frame <- function(config) {
+  data.frame(parameter = names(config),
+             value = vapply(config, function(x) paste(x, collapse = ","), character(1)),
+             stringsAsFactors = FALSE)
+}
+
+if (isTRUE(opt$print_profile)) {
+  write.table(parameter_frame(cfg), stdout(), sep = "\t", quote = FALSE, row.names = FALSE)
+  quit(status = 0L)
+}
+if (is.null(opt$input_dir) || is.null(opt$output_dir)) usage(2L)
+if (!requireNamespace("dada2", quietly = TRUE)) stop("R package 'dada2' is required")
+
+threads <- if (is.null(opt$threads)) 4L else as.integer(opt$threads)
+if (!is.finite(threads) || threads < 1L) stop("--threads must be >= 1")
+reads1_suffix <- if (is.null(opt$reads1_suffix)) "_1.fastq.gz" else opt$reads1_suffix
+reads2_suffix <- if (is.null(opt$reads2_suffix)) "_2.fastq.gz" else opt$reads2_suffix
+min_boot <- if (is.null(opt$min_boot)) 50L else as.integer(opt$min_boot)
+if (!is.finite(min_boot) || min_boot < 0L || min_boot > 100L) {
+  stop("--min_boot must be between 0 and 100")
+}
+input_dir <- normalizePath(opt$input_dir, mustWork = TRUE)
+output_dir <- normalizePath(opt$output_dir, mustWork = FALSE)
+if (!dir.exists(output_dir) && !dir.create(output_dir, recursive = TRUE)) stop("Cannot create: ", output_dir)
+
+timestamp <- function() format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+log_message <- function(level, ...) message("[", timestamp(), "] [", level, "] ", paste0(..., collapse = ""))
+elapsed <- function(start) sprintf("%.1fs", as.numeric(difftime(Sys.time(), start, units = "secs")))
+
+discover_inputs <- function(path, suffix_f, suffix_r, layout) {
+  entries <- sort(list.files(path, full.names = TRUE, recursive = FALSE))
+  entry_info <- file.info(entries)
+  entries <- entries[!is.na(entry_info$isdir) & !entry_info$isdir]
+  forward <- entries[endsWith(entries, suffix_f)]
+  if (!length(forward)) stop("No files end with --reads1_suffix '", suffix_f, "' in ", path)
+  samples <- substr(basename(forward), 1L, nchar(basename(forward)) - nchar(suffix_f))
+  if (any(!nzchar(samples)) || anyDuplicated(samples)) stop("FASTQ suffixes do not produce unique non-empty sample names")
+  names(forward) <- samples
+  reverse <- NULL
+  if (layout == "pe") {
+    reverse <- file.path(path, paste0(samples, suffix_r))
+    names(reverse) <- samples
+    missing <- reverse[!file.exists(reverse)]
+    if (length(missing)) stop("Missing R2 for: ", paste(names(missing), collapse = ", "))
   }
-  list(filtFs = filtFs, filter_out = filter_out)
+  list(forward = forward, reverse = reverse, samples = samples)
 }
 
-filter_and_trim_pe <- function(fastqFs, fastqRs, filtFs, filtRs, threads,
-                               reads1_suffix, reads2_suffix, failed_sample_lst) {
-  if (length(fastqFs) != length(fastqRs)) stop("Forward and reverse files do not match.")
-  filter_out <- filterAndTrim(
-    fwd = fastqFs, filt = filtFs,
-    rev = fastqRs, filt.rev = filtRs,
-    maxEE = 2, truncQ = 11, maxN = 0, rm.phix = TRUE,
-    compress = FALSE, verbose = TRUE, multithread = threads, n = 1e+08,
-    truncLen=c(truncLengthf, truncLengthr)
-  )
+inputs <- discover_inputs(input_dir, reads1_suffix, reads2_suffix, mode)
+filtered_dir <- file.path(output_dir, "dada2_filtered")
+if (!dir.exists(filtered_dir) && !dir.create(filtered_dir, recursive = TRUE)) stop("Cannot create: ", filtered_dir)
+filt_f <- setNames(file.path(filtered_dir, basename(inputs$forward)), inputs$samples)
+filt_r <- if (mode == "pe") setNames(file.path(filtered_dir, basename(inputs$reverse)), inputs$samples) else NULL
 
-  # Drop samples with zero reads after filtering
-  if (any(filter_out[, "reads.out"] == 0)) {
-    failed_fqs <- rownames(filter_out)[filter_out[, "reads.out"] == 0]
-    suf_pat    <- paste0("(", reads1_suffix, "|", reads2_suffix, ")$")
-    failed_samples <- unique(sub(suf_pat, "", basename(failed_fqs)))
-    if (length(failed_samples) > 0) {
-      write.table(failed_samples, file = failed_sample_lst, quote = FALSE, row.names = FALSE, col.names = FALSE)
-      log_warn("Samples removed after filtering: %s", paste(failed_samples, collapse = ", "))
-    }
-    filtFs     <- filtFs[!names(filtFs) %in% failed_samples]
-    filtRs     <- filtRs[!names(filtRs) %in% failed_samples]
-    keep_rows  <- !(basename(rownames(filter_out)) %in% c(paste0(failed_samples, reads1_suffix),
-                                                          paste0(failed_samples, reads2_suffix)))
-    filter_out <- filter_out[keep_rows, , drop = FALSE]
-  }
-  list(filtFs = filtFs, filtRs = filtRs, filter_out = filter_out)
+cfg$threads <- threads
+cfg$reads1_suffix <- reads1_suffix
+cfg$reads2_suffix <- if (mode == "pe") reads2_suffix else "NA"
+cfg$min_boot <- min_boot
+cfg$dada2_version <- as.character(packageVersion("dada2"))
+cfg$workflow_version <- VERSION
+write.table(parameter_frame(cfg), file.path(output_dir, "effective_parameters.tsv"),
+            sep = "\t", quote = FALSE, row.names = FALSE)
+
+if (platform == "nanopore") {
+  log_message("WARN", "Nanopore support is experimental. Validate ASVs with a mock community; ",
+              "the official DADA2 long-read model is PacBio CCS-specific.")
+}
+if (marker == "its" && (cfg$trunc_len_f > 0 || cfg$trunc_len_r > 0)) {
+  log_message("WARN", "Fixed truncation can remove real ITS length variants; use only after inspecting quality profiles.")
 }
 
-# -------------------------------
-# Error learning
-# -------------------------------
-learn_err_safe <- function(files, threads, nbases = 1e+08) {
-  if (length(files) == 0) stop("No reads passed the filter.")
-  learnErrors(files, multithread = threads, randomize = TRUE, nbases = nbases)
-}
+filter_args <- list(maxN = 0,
+                    maxEE = if (mode == "pe") c(cfg$max_ee_f, cfg$max_ee_r) else cfg$max_ee_f,
+                    truncQ = cfg$trunc_q, minQ = cfg$min_q, minLen = cfg$min_len,
+                    trimLeft = if (mode == "pe") c(cfg$trim_left, cfg$trim_left) else cfg$trim_left,
+                    truncLen = if (mode == "pe") c(cfg$trunc_len_f, cfg$trunc_len_r) else cfg$trunc_len_f,
+                    rm.phix = cfg$rm_phix, compress = TRUE,
+                    multithread = threads, verbose = TRUE)
+if (cfg$max_len > 0) filter_args$maxLen <- cfg$max_len
 
-# -------------------------------
-# Denoise SE
-# -------------------------------
-denoise_se <- function(filtFs, sample_names, errF, threads, platform) {
-  ddFs <- vector("list", length(sample_names))
-  names(ddFs) <- sample_names
-  for (i in seq_along(sample_names)) {
-    sam <- sample_names[i]
-    t0  <- Sys.time()
-    log_info("SE denoise: %s (%d/%d)", sam, i, length(sample_names))
-    derep <- derepFastq(filtFs[[sam]], 1e+08)
-    if (platform == "illumina") {
-      ddFs[[sam]] <- dada(derep, err = errF, multithread = threads)
-    } else {
-      ddFs[[sam]] <- dada(derep, err = errF, multithread = threads,
-                          HOMOPOLYMER_GAP_PENALTY = -1, BAND_SIZE = 32)
-    }
-    cat("    Elapsed:", elapsed_time(t0), "\n")
-  }
-  ddFs
-}
-
-# -------------------------------
-# Denoise + Merge PE
-# -------------------------------
-denoise_merge_pe <- function(filtFs, filtRs, sample_names, errF, errR, threads) {
-  mergers           <- vector("list", length(sample_names))
-  names(mergers)    <- sample_names
-  denoisedF_counts  <- numeric(length(sample_names))
-  denoisedR_counts  <- numeric(length(sample_names))
-  names(denoisedF_counts) <- sample_names
-  names(denoisedR_counts) <- sample_names
-
-  for (i in seq_along(sample_names)) {
-    sam <- sample_names[i]
-    t0  <- Sys.time()
-    log_info("PE denoise/merge: %s (%d/%d)", sam, i, length(sample_names))
-    derepF <- derepFastq(filtFs[[sam]], 1e+08)
-    ddF    <- dada(derepF, err = errF, multithread = threads)
-    derepR <- derepFastq(filtRs[[sam]], 1e+08)
-    ddR    <- dada(derepR, err = errR, multithread = threads)
-    mergers[[sam]] <- mergePairs(ddF, derepF, ddR, derepR, verbose=TRUE)
-    denoisedF_counts[sam] <- sum(getUniques(ddF))
-    denoisedR_counts[sam] <- sum(getUniques(ddR))
-    cat("    Elapsed:", elapsed_time(t0), "\n")
-  }
-  list(mergers = mergers,
-       denoisedF_counts = denoisedF_counts,
-       denoisedR_counts = denoisedR_counts)
-}
-
-# -------------------------------
-# Chimera removal
-# -------------------------------
-chimera_remove <- function(seqtab, threads, verbose = TRUE) {
-  removeBimeraDenovo(seqtab, method = "consensus", multithread = threads, verbose = verbose)
-}
-
-# -------------------------------
-# Banner / Params
-# -------------------------------
-start_time0 <- Sys.time()
-cat("\n           DADA2 Amplicon Analysis\n")
-cat("==============================================\n")
-cat("    Input directory : ", input_dir,  "\n")
-cat("    Output directory: ", output_dir, "\n")
-cat("    Mode            : ", toupper(mode), "\n")
-cat("    Threads         : ", threads,     "\n")
-cat("    Platform        : ", platform,    "\n")
-
-ensure_dir(output_dir)
-
-# Discover inputs
-disc <- discover_inputs(input_dir, reads1_suffix, reads2_suffix, mode)
-fastqFs      <- disc$fastqFs
-fastqRs      <- disc$fastqRs
-sample_names <- disc$sample_names
-sample_count <- length(sample_names)
-
-cat("    Sample count    : ", sample_count, "\n")
-cat("==============================================\n")
-
-# Filtered file paths
-filtpath <- file.path(output_dir, "dada2_filtered")
-ensure_dir(filtpath)
-filtFs <- file.path(filtpath, sub(".gz$", "", basename(fastqFs)))
-names(filtFs) <- sample_names
+start_all <- Sys.time()
+log_message("INFO", "Filtering ", length(inputs$samples), " sample(s); marker=", marker,
+            ", platform=", platform, ", mode=", mode)
+start <- Sys.time()
 if (mode == "pe") {
-  filtRs <- file.path(filtpath, sub(".gz$", "", basename(fastqRs)))
-  names(filtRs) <- sample_names
-}
-failed_sample_lst <- file.path(output_dir, "filterAndTrim_failed_samples.tsv")
-
-# -------------------------------
-# Main pipeline
-# -------------------------------
-seqtab.nochim <- NULL
-track <- NULL
-
-if (mode == "se") {
-  # ---- SE pipeline ----
-  log_step("1: FilterAndTrim (SE)")
-  t <- Sys.time()
-  ft <- filter_and_trim_se(fastqFs, filtFs, platform, threads, failed_sample_lst)
-  filtFs     <- ft$filtFs
-  filter_out <- ft$filter_out
-  if (nrow(filter_out) == 0) stop("No reads passed the filter.")
-  cat("    Elapsed time: ", elapsed_time(t), "\n")
-
-  log_step(" 2: learnErrors (F)")
-  t <- Sys.time()
-  errF <- learn_err_safe(filtFs, threads)
-  cat("    Elapsed time: ", elapsed_time(t), "\n")
-
-  log_step(" 3: derep & dada (SE)")
-  t <- Sys.time()
-  ddFs <- denoise_se(filtFs, names(filtFs), errF, threads, platform)
-  cat("    Elapsed time: ", elapsed_time(t), "\n")
-
-  log_step(" 4: makeSequenceTable & removeBimeraDenovo")
-  t <- Sys.time()
-  seqtab <- makeSequenceTable(ddFs)
-  seqtab.nochim <- chimera_remove(seqtab, threads)
-  cat("    Elapsed time: ", elapsed_time(t), "\n")
-
-  track <- build_track_se(filter_out, ddFs, seqtab.nochim, names(filtFs))
-
+  filter_out <- do.call(dada2::filterAndTrim,
+                        c(list(fwd = inputs$forward, filt = filt_f,
+                               rev = inputs$reverse, filt.rev = filt_r), filter_args))
 } else {
-  # ---- PE pipeline ----
-  log_step(" 1: FilterAndTrim (PE)")
-  t <- Sys.time()
-  ft <- filter_and_trim_pe(fastqFs, fastqRs, filtFs, filtRs, threads,
-                           reads1_suffix, reads2_suffix, failed_sample_lst)
-  filtFs     <- ft$filtFs
-  filtRs     <- ft$filtRs
-  filter_out <- ft$filter_out
-  if (nrow(filter_out) == 0) stop("No reads passed the filter.")
-  cat("    Elapsed time: ", elapsed_time(t), "\n")
+  filter_out <- do.call(dada2::filterAndTrim, c(list(fwd = inputs$forward, filt = filt_f), filter_args))
+}
+log_message("INFO", "Filtering completed in ", elapsed(start))
 
-  log_step(" 2: learnErrors (F & R)")
-  t <- Sys.time()
-  errF <- learn_err_safe(filtFs, threads)
-  errR <- learn_err_safe(filtRs, threads)
-  cat("    Elapsed time: ", elapsed_time(t), "\n")
+keep <- filter_out[, "reads.out"] > 0
+if (!any(keep)) stop("No reads passed filtering")
+if (any(!keep)) {
+  failed <- inputs$samples[!keep]
+  writeLines(failed, file.path(output_dir, "filter_failed_samples.txt"))
+  log_message("WARN", "No reads remained for: ", paste(failed, collapse = ", "))
+}
+filter_out <- filter_out[keep, , drop = FALSE]
+filt_f <- filt_f[keep]
+if (mode == "pe") filt_r <- filt_r[keep]
+samples <- names(filt_f)
 
-  log_step(" 3: derep, dada & mergePairs (PE)")
-  t <- Sys.time()
-  dpe <- denoise_merge_pe(filtFs, filtRs, names(filtFs), errF, errR, threads)
-  mergers          <- dpe$mergers
-  denoisedF_counts <- dpe$denoisedF_counts
-  denoisedR_counts <- dpe$denoisedR_counts
-  cat("     Denoise_merge_pe elapsed time: ", elapsed_time(t), "\n")
-
-  log_step(" 4: makeSequenceTable & removeBimeraDenovo")
-  t <- Sys.time()
-  seqtab <- makeSequenceTable(mergers)
-  seqtab.nochim <- chimera_remove(seqtab, threads, verbose = TRUE)
-  cat("    Elapsed time: ", elapsed_time(t), "\n")
-
-  track <- build_track_pe(filter_out, denoisedF_counts, denoisedR_counts, mergers, seqtab.nochim, names(filtFs))
-
-  # ---- Suggest SE if many reads failed to merge ----
-  need_se <- suggest_pe2se(track, out_dir = output_dir,
-                           ratio_thr = 0.50, frac_thr = 0.25,
-                           write_note = TRUE)
-
-  if (isTRUE(need_se)) {
-    log_warn("Switching to SE analysis on filtered F reads (reuse filtFs).")
-    # Re-run SE denoising and chimera removal on F only, reusing errF
-    log_step("SE fallback: derep & dada (F only)")
-    t <- Sys.time()
-    ddFs <- denoise_se(filtFs, names(filtFs), errF, threads, platform)
-    cat("    Elapsed time: ", elapsed_time(t), "\n")
-
-    log_step("SE fallback: makeSequenceTable & removeBimeraDenovo")
-    t <- Sys.time()
-    seqtab <- makeSequenceTable(ddFs)
-    seqtab.nochim <- chimera_remove(seqtab, threads)
-    cat("    Elapsed time: ", elapsed_time(t), "\n")
-
-    track <- build_track_se(filter_out, ddFs, seqtab.nochim, names(filtFs))
+set.seed(as.integer(cfg$seed))
+error_fun <- switch(cfg$error_model,
+                    pacbio = dada2::PacBioErrfun,
+                    noqual = dada2::noqualErrfun,
+                    quality = dada2::loessErrfun)
+learn_one <- function(files, label) {
+  log_message("INFO", "Learning ", label, " error model from ",
+              format(cfg$learn_nbases, scientific = FALSE), " bases")
+  start <- Sys.time()
+  learn_args <- list(files, nbases = cfg$learn_nbases, randomize = TRUE,
+                     multithread = threads, errorEstimationFunction = error_fun,
+                     verbose = TRUE)
+  if (cfg$band_size != 16L) learn_args$BAND_SIZE <- cfg$band_size
+  if (!is.na(cfg$homopolymer_gap_penalty)) {
+    learn_args$HOMOPOLYMER_GAP_PENALTY <- cfg$homopolymer_gap_penalty
   }
+  ans <- do.call(dada2::learnErrors, learn_args)
+  log_message("INFO", label, " error learning completed in ", elapsed(start))
+  ans
+}
+err_f <- learn_one(filt_f, "R1/SE")
+err_r <- if (mode == "pe") learn_one(filt_r, "R2") else NULL
+saveRDS(err_f, file.path(output_dir, "error_model_r1.rds"))
+if (mode == "pe") {
+  saveRDS(err_r, file.path(output_dir, "error_model_r2.rds"))
+} else {
+  unlink(file.path(output_dir, "error_model_r2.rds"), force = TRUE)
 }
 
-# -------------------------------
-# Save outputs
-# -------------------------------
-saveRDS(seqtab.nochim, file = file.path(output_dir, "seqtab.nochim.rds"))
-log_info("Saved ASV table: %s", file.path(output_dir, "seqtab.nochim.rds"))
+pool_arg <- switch(cfg$pool, independent = FALSE, pseudo = "pseudo", true = TRUE)
+dada_args <- list(multithread = threads, pool = pool_arg, verbose = TRUE,
+                  BAND_SIZE = cfg$band_size, selfConsist = cfg$self_consist)
+if (cfg$self_consist) dada_args$errorEstimationFunction <- error_fun
+if (!is.na(cfg$homopolymer_gap_penalty)) {
+  dada_args$HOMOPOLYMER_GAP_PENALTY <- cfg$homopolymer_gap_penalty
+}
 
-write.table(track, file = file.path(output_dir, "track.summary.tsv"),
+log_message("INFO", "Dereplicating and denoising with pool=", cfg$pool)
+start <- Sys.time()
+derep_f <- dada2::derepFastq(filt_f, verbose = TRUE)
+names(derep_f) <- samples
+dd_f <- do.call(dada2::dada, c(list(derep_f, err = err_f), dada_args))
+if (mode == "pe") {
+  derep_r <- dada2::derepFastq(filt_r, verbose = TRUE)
+  names(derep_r) <- samples
+  dd_r <- do.call(dada2::dada, c(list(derep_r, err = err_r), dada_args))
+  mergers <- dada2::mergePairs(dd_f, derep_f, dd_r, derep_r,
+                               minOverlap = cfg$min_overlap,
+                               maxMismatch = cfg$max_mismatch, verbose = TRUE)
+  seqtab <- dada2::makeSequenceTable(mergers)
+} else {
+  dd_r <- NULL
+  mergers <- NULL
+  seqtab <- dada2::makeSequenceTable(dd_f)
+}
+if (!ncol(seqtab)) stop("Denoising produced no ASVs")
+log_message("INFO", "Denoising/merging completed in ", elapsed(start))
+
+if (cfg$chimera == "none") {
+  seqtab_nochim <- seqtab
+} else {
+  log_message("INFO", "Removing chimeras with method=", cfg$chimera)
+  seqtab_nochim <- dada2::removeBimeraDenovo(seqtab, method = cfg$chimera,
+                                             multithread = threads, verbose = TRUE)
+}
+if (!ncol(seqtab_nochim)) stop("Chimera removal left no ASVs")
+
+get_n <- function(x) sum(dada2::getUniques(x))
+track <- data.frame(input = filter_out[, "reads.in"], filtered = filter_out[, "reads.out"],
+                    denoisedF = vapply(dd_f, get_n, numeric(1)), row.names = samples,
+                    check.names = FALSE)
+if (mode == "pe") {
+  track$denoisedR <- vapply(dd_r, get_n, numeric(1))
+  track$merged <- vapply(mergers, get_n, numeric(1))
+}
+track$nonchim <- rowSums(seqtab_nochim[samples, , drop = FALSE])
+track$retained_pct <- round(100 * track$nonchim / pmax(track$input, 1), 3)
+
+saveRDS(seqtab_nochim, file.path(output_dir, "seqtab.nochim.rds"), compress = "xz")
+write.table(track, file.path(output_dir, "track.summary.tsv"),
             sep = "\t", quote = FALSE, col.names = NA)
-log_info("Saved summary: %s", file.path(output_dir, "track.summary.tsv"))
+write.table(seqtab_nochim, file.path(output_dir, "seqtab.nochim.tsv"),
+            sep = "\t", quote = FALSE, col.names = NA)
+asv_seq <- colnames(seqtab_nochim)
+writeLines(as.vector(rbind(paste0(">ASV", seq_along(asv_seq)), asv_seq)),
+           file.path(output_dir, "ASVs.fasta"))
 
-# Optional taxonomy
-if (!is.null(opt$classifier) && file.exists(opt$classifier)) {
-  log_step(" 5: Assign taxonomy")
-  t <- Sys.time()
-  tax <- assignTaxonomy(seqtab.nochim, opt$classifier, multithread = threads, verbose = TRUE)
-  write.table(tax, file = file.path(output_dir, "taxonomy.tsv"),
-              sep = "\t", quote = FALSE, col.names = NA)
-  log_info("Saved taxonomy: %s (Elapsed: %s)", file.path(output_dir, "taxonomy.tsv"), elapsed_time(t))
+if (mode == "pe") {
+  unlink(file.path(output_dir, c("suggestion.pe2se.note", "suggestion.is_pe.note")), force = TRUE)
+  merge_ratio <- track$merged / pmax(track$input, 1)
+  low_fraction <- mean(merge_ratio < 0.5)
+  note <- c(sprintf("Samples with merged/input < 50%%: %d/%d (%.1f%%)",
+                    sum(merge_ratio < 0.5), length(merge_ratio), 100 * low_fraction),
+            sprintf("Median merged/input: %.1f%%", 100 * median(merge_ratio)))
+  if (low_fraction >= 0.25) {
+    note <- c(note, "Recommendation: inspect overlap and quality; consider forward-only SE analysis.")
+    writeLines(note, file.path(output_dir, "suggestion.pe2se.note"))
+  } else {
+    note <- c(note, "Recommendation: PE retention is acceptable under the configured threshold.")
+    writeLines(note, file.path(output_dir, "suggestion.is_pe.note"))
+  }
+} else {
+  unlink(file.path(output_dir, c("suggestion.pe2se.note", "suggestion.is_pe.note")), force = TRUE)
 }
 
-# Cleanup
-log_step("Cleanup: removing filtered FASTQ files (%s)", filtpath)
-unlink(filtpath, recursive = TRUE, force = TRUE)
+if (!is.null(opt$classifier)) {
+  classifier <- normalizePath(opt$classifier, mustWork = TRUE)
+  log_message("INFO", "Assigning taxonomy with ", classifier)
+  taxa <- dada2::assignTaxonomy(seqtab_nochim, classifier, minBoot = min_boot,
+                                tryRC = !isTRUE(opt$no_try_rc),
+                                multithread = threads, verbose = TRUE)
+  write.table(taxa, file.path(output_dir, "taxonomy.tsv"),
+              sep = "\t", quote = FALSE, col.names = NA)
+  saveRDS(taxa, file.path(output_dir, "taxonomy.rds"), compress = "xz")
+} else {
+  unlink(file.path(output_dir, c("taxonomy.tsv", "taxonomy.rds")), force = TRUE)
+}
 
-log_info("DADA2 finished. Total elapsed time: %s", elapsed_time(start_time0))
+capture.output(sessionInfo(), file = file.path(output_dir, "sessionInfo.txt"))
+if (!isTRUE(opt$keep_filtered)) unlink(filtered_dir, recursive = TRUE, force = TRUE)
+log_message("INFO", "Finished: ", nrow(seqtab_nochim), " samples, ",
+            ncol(seqtab_nochim), " ASVs, elapsed ", elapsed(start_all))

@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 import ssl
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 # Try tqdm for a rich progress bar; provide a lightweight fallback if missing
@@ -32,7 +33,8 @@ FIELDS = ",".join([
     "submitted_ftp", "submitted_md5", "submitted_bytes",
 ])
 
-UA = "ena-bulk-linker/2025 (non-commercial, ENA API)"
+VERSION = "2.0.0"
+UA = "amplicon-analysis-hub/2.0 (ENA Portal API client)"
 TIMEOUT = 60
 MAX_RETRIES = 5
 RETRY_BACKOFF = 1.8  # Exponential backoff factor for retries
@@ -40,18 +42,19 @@ RETRY_BACKOFF = 1.8  # Exponential backoff factor for retries
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Resolve ENA download links for massive SRA accessions."
+        description="Resolve ENA download links for large SRA accession lists.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("accession_file", help="one SRR/ERR/DRR per line")
     parser.add_argument(
         "--out-tsv",
         default="links.tsv",
-        help="Detailed TSV (run_accession,kind,url,md5,bytes) [default: links.tsv]",
+        help="Detailed TSV (run_accession,kind,url,md5,bytes)",
     )
     parser.add_argument(
         "--missing",
         default="ENA_missing.tsv",
-        help="Accessions with no links found [default: ENA_missing.tsv]",
+        help="Accessions with no links found",
     )
     parser.add_argument(
         "--prefer",
@@ -61,9 +64,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scheme",
-        default="ftp",
-        choices=["http", "ftp"],
-        help="URL scheme to prepend when ENA returns host/path without scheme",
+        choices=["https", "ftp"],
+        default="https",
+        help="URL scheme prepended when ENA returns host/path without a scheme",
     )
     parser.add_argument(
         "--batch",
@@ -75,9 +78,15 @@ def parse_args() -> argparse.Namespace:
         "--threads",
         type=int,
         default=8,
-        help="Number of concurrent threads (API requests)",
+        help="Concurrent API requests",
     )
-    return parser.parse_args()
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    args = parser.parse_args()
+    if args.batch < 1 or args.batch > 1000:
+        parser.error("--batch must be between 1 and 1000")
+    if args.threads < 1:
+        parser.error("--threads must be >= 1")
+    return args
 
 
 def chunked(iterable: List[str], n: int):
@@ -167,7 +176,7 @@ def fetch_batch(
                 if p.startswith(("ftp://", "http://", "https://")):
                     url = p
                 else:
-                    url = ("http://" if scheme == "http" else "ftp://") + p
+                    url = ("https://" if scheme == "https" else "ftp://") + p
                 m = md5s[i] if i < len(md5s) else ""
                 b = byt[i] if i < len(byt) else ""
                 bucket.append((kind, url, m, b))
@@ -178,14 +187,15 @@ def fetch_batch(
             if not run:
                 continue
 
-            items: List[Tuple[str, str, str, str]] = []
-            # Order: fastq -> sra -> submitted
-            items += split_and_norm(row, "fastq_ftp", "fastq_md5", "fastq_bytes", "fastq")
-            items += split_and_norm(row, "sra_ftp", "sra_md5", "sra_bytes", "sra")
-            items += split_and_norm(row, "submitted_ftp", "submitted_md5", "submitted_bytes", "submitted")
-
-            if prefer in ("fastq", "sra", "submitted"):
-                items = [x for x in items if x[0] == prefer]
+            buckets = {
+                "fastq": split_and_norm(row, "fastq_ftp", "fastq_md5", "fastq_bytes", "fastq"),
+                "sra": split_and_norm(row, "sra_ftp", "sra_md5", "sra_bytes", "sra"),
+                "submitted": split_and_norm(row, "submitted_ftp", "submitted_md5", "submitted_bytes", "submitted"),
+            }
+            all_items = buckets["fastq"] + buckets["sra"] + buckets["submitted"]
+            # "prefer" uses the requested kind when available, then falls back
+            # to any available link instead of incorrectly reporting it missing.
+            items = buckets[prefer] if prefer != "any" and buckets[prefer] else all_items
 
             out[run] = items
 
@@ -246,61 +256,64 @@ def main():
         for line in fh:
             line = line.strip()
             if line and not line.startswith("#"):
-                runs.append(line)
+                runs.append(line.split()[0])
+    runs = list(dict.fromkeys(runs))
     if not runs:
         print("[ERROR] Empty input file", file=sys.stderr)
         sys.exit(1)
 
-    # Initialize output files
-    with open(args.out_tsv, "w", encoding="utf-8") as ftsv:
-        ftsv.write("run_accession\tkind\turl\tmd5\tbytes\n")
-    with open(args.missing, "w", encoding="utf-8"):
-        pass  # truncate
+    out_path = Path(args.out_tsv)
+    missing_path = Path(args.missing)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    missing_path.parent.mkdir(parents=True, exist_ok=True)
 
     total = len(runs)
-    processed = 0
-    missing_all: List[str] = []
+    resolved: Dict[str, List[Tuple[str, str, str, str]]] = {}
 
     # Build progress bar over total runs
     pbar = _make_progress(total=total, desc="Resolving", unit="runs")
 
     # Concurrent requests
+    batches = list(chunked(runs, args.batch))
     with ThreadPoolExecutor(max_workers=args.threads) as pool:
-        futures = []
-        for batch in chunked(runs, args.batch):
-            futures.append(pool.submit(fetch_batch, batch, args.prefer, args.scheme))
-
+        futures = {
+            pool.submit(fetch_batch, batch, args.prefer, args.scheme): batch
+            for batch in batches
+        }
         for fut in as_completed(futures):
+            batch = futures[fut]
             mapping, err = fut.result()
             if err:
                 print(err, file=sys.stderr)
-
-            rows_for_outfile: List[Tuple[str, str, str, str, str]] = []
-            for acc, items in mapping.items():
-                if not items:
-                    missing_all.append(acc)
-                    continue
-                for kind, url, md5, byt in items:
-                    rows_for_outfile.append((acc, kind, url, md5, byt))
-
-            # Append to TSV in the main thread to avoid file write contention
-            if rows_for_outfile:
-                with open(args.out_tsv, "a", encoding="utf-8") as ftsv:
-                    for r in rows_for_outfile:
-                        ftsv.write("\t".join(r) + "\n")
-
-            # Update progress by the number of runs completed in this future
-            processed += len(mapping)
-            pbar.update(len(mapping))
+            # ENA can omit an accession from an otherwise successful batch.
+            # Record it explicitly so progress and the missing report stay exact.
+            for acc in batch:
+                resolved[acc] = mapping.get(acc, [])
+            pbar.update(len(batch))
 
     pbar.close()
 
+    # Futures finish out of order; write in the user's accession order to make
+    # repeated runs byte-for-byte comparable.
+    with open(out_path, "w", encoding="utf-8", newline="") as ftsv:
+        writer = csv.writer(ftsv, delimiter="\t", lineterminator="\n")
+        writer.writerow(("run_accession", "kind", "url", "md5", "bytes"))
+        for acc in runs:
+            writer.writerows(
+                (acc, kind, url, md5, byt)
+                for kind, url, md5, byt in resolved.get(acc, [])
+            )
+
+    missing_all = [acc for acc in runs if not resolved.get(acc)]
+
     # Write missing accessions, if any
     if missing_all:
-        with open(args.missing, "a", encoding="utf-8") as f:
-            for m in missing_all:
+        with open(missing_path, "w", encoding="utf-8") as f:
+            for m in sorted(set(missing_all)):
                 f.write(m + "\n")
         print(f"[WARN] {len(missing_all)} accessions missing; see {args.missing}", file=sys.stderr)
+    else:
+        missing_path.write_text("", encoding="utf-8")
 
     print(f"Done: {args.out_tsv} (details), {args.missing} (missing)")
 

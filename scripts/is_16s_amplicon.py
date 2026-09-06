@@ -1,290 +1,230 @@
 #!/usr/bin/env python3
-"""
-is_16s_amplicon - 16S amplicon checker with BLAST.
+"""Screen FASTQ files against the bundled bacterial/archaeal 16S BLAST DB."""
 
-Threads:
-  --threads means threads PER JOB (per sample).
-    Total threads ≈ threads * concurrent.
-
-Features:
-  - Pure pipeline (no temp files): seqkit head | seqkit fq2fa | blastn -query -
-  - Multi-sample concurrency (process many samples in parallel)
-  - Streamed output (each sample prints as soon as it finishes)
-  - STDIN or argv inputs
-  - STDOUT formats: table / tsv / csv
-  - Optional --output writes streamed results to a file (tsv/csv)
-
-Examples:
-  # 1) Read sample list from stdin (with shell globbing). Total threads ≈ 4 * 3 = 12
-  ls fq/*.fastq.gz | python3 is_16s_amplicon.py - --threads 4 --concurrent 3 --nreads 50
-
-  # 2) Mixed inputs: both '-' (stdin) and explicit paths
-  printf "fq/A.fastq.gz\nfq/B.fastq.gz\n" | python3 is_16s_amplicon.py - fq/C.fastq.gz fq/D.fastq.gz -t 8 -c 2 -n 1000 --format tsv
-
-  # 3) Specify BLAST DB and write results to file
-  ls fq/*.gz | python3 is_16s_amplicon.py - -d /share/cn1_fs/database/dada2_gtdb_ref/arch_bac_nr_16s \
-    -n 800 -t 6 -c 4 --format csv -o 16s_screen.tsv --out-format tsv
-
-  # 4) Show aligned table on terminal only
-  python3 is_16s_amplicon.py fq/A.fastq.gz fq/B.fastq.gz --format table
-
-Requirements:
-  - seqkit >= 2.x
-  - BLAST+ (blastn) available, --db points to a valid 16S reference DB
-  - Enough file handles & CPU: total threads ≈ --threads * --concurrent
-"""
+from __future__ import annotations
 
 import argparse
 import csv
+import gzip
+import io
+import shutil
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
+from typing import Any, Iterable, TextIO
 
+VERSION = "2.0.0"
 HEADER = ["sample_id", "bac_hits", "arch_hits", "total_hits", "total_percent", "is_16S"]
-BLASTn_16s_DB = Path(__file__).resolve().parent.parent / "data" / "arc_bac_16s_blastDB" / "arch_bac_16s_ref_90"
+DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "arc_bac_16s_blastDB" / "arch_bac_16s_ref_90"
 
-# ------------ Single-sample BLAST pipeline runner ------------
-def run_blast_stream(
-    fq_path: Path,
-    db: str,
+
+def open_text(path: Path) -> TextIO:
+    if path.name.lower().endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8", errors="replace")
+    return path.open("r", encoding="utf-8", errors="replace")
+
+
+def sample_fasta(path: Path, limit: int) -> tuple[str, int]:
+    """Read at most *limit* FASTQ records and return FASTA plus actual count."""
+    chunks: list[str] = []
+    count = 0
+    with open_text(path) as handle:
+        while count < limit:
+            header = handle.readline()
+            if not header:
+                break
+            sequence = handle.readline().strip()
+            plus = handle.readline()
+            quality = handle.readline().strip()
+            if not sequence or not plus or not quality:
+                raise ValueError(f"truncated FASTQ record at read {count + 1}")
+            if not header.startswith("@") or not plus.startswith("+"):
+                raise ValueError(f"invalid FASTQ record at read {count + 1}")
+            if len(sequence) != len(quality):
+                raise ValueError(f"sequence/quality lengths differ at read {count + 1}")
+            # Synthetic IDs guarantee uniqueness even in concatenated public
+            # FASTQs whose original read identifiers are duplicated.
+            read_id = f"read_{count + 1}"
+            chunks.append(f">{read_id}\n{sequence}\n")
+            count += 1
+    return "".join(chunks), count
+
+
+def database_exists(prefix: Path) -> bool:
+    return any(
+        candidate.exists()
+        for candidate in (
+            Path(f"{prefix}.nhr"), Path(f"{prefix}.ndb"), Path(f"{prefix}.00.nhr")
+        )
+    )
+
+
+def run_screen(
+    fastq: Path,
+    db: Path,
     nreads: int,
     identity: float,
-    threads_per_job: int,
-) -> Dict[str, Any]:
-    """
-    Pipeline:
-      seqkit head (sample N reads) ->
-      seqkit fq2fa (FASTQ->FASTA) ->
-      blastn -query - (reads fasta from stdin), outfmt 6
-    Parse BLAST output line by line, count unique qseqid passing identity.
-    """
-    sample_name = fq_path.name
-
-    # Step 1: take N reads
-    p1 = subprocess.Popen(
-        ["seqkit", "head", "-j", str(max(1, threads_per_job)), "-n", str(nreads), str(fq_path)],
-        stdout=subprocess.PIPE,
-    )
-    # Step 2: FASTQ -> FASTA
-    p2 = subprocess.Popen(
-        ["seqkit", "fq2fa", "-j", str(max(1, threads_per_job)), "-"],
-        stdin=p1.stdout,
-        stdout=subprocess.PIPE,
-    )
-    if p1.stdout is not None:
-        p1.stdout.close()
-
-    # Step 3: run BLAST, read fasta from stdin
-    p3 = subprocess.Popen(
-        [
-            "blastn", "-query", "-", "-db", db,
-            "-evalue", "1e-5",
-            "-outfmt", "6 qseqid sseqid pident length qlen slen",
-            "-num_threads", str(max(1, threads_per_job)),
-            "-max_target_seqs", "5",   # keep 5 to suppress BLAST warning
-            "-max_hsps", "1",
-            "-task", "megablast",
-            "-word_size", "28",
-            "-dust", "no",
-        ],
-        stdin=p2.stdout,
-        stdout=subprocess.PIPE,
+    query_coverage: float,
+    hit_threshold: float,
+    threads: int,
+) -> dict[str, Any]:
+    fasta, sampled = sample_fasta(fastq, nreads)
+    if sampled == 0:
+        return {
+            "sample_id": fastq.name,
+            "bac_hits": 0,
+            "arch_hits": 0,
+            "total_hits": 0,
+            "total_percent": "0.000",
+            "is_16S": "NO",
+        }
+    command = [
+        "blastn", "-query", "-", "-db", str(db), "-task", "blastn",
+        "-word_size", "11", "-evalue", "1e-10", "-dust", "no",
+        "-num_threads", str(threads), "-max_target_seqs", "5", "-max_hsps", "1",
+        "-outfmt", "6 qseqid sseqid pident qcovhsp bitscore",
+    ]
+    completed = subprocess.run(
+        command,
+        input=fasta,
         text=True,
-        encoding="utf-8",
-        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
     )
-    if p2.stdout is not None:
-        p2.stdout.close()
+    if completed.returncode:
+        raise RuntimeError(f"blastn failed for {fastq}: {completed.stderr.strip()}")
 
-    # Parse BLAST output
-    hits: Dict[str, str] = {}
-    assert p3.stdout is not None
-    for line in p3.stdout:
-        parts = line.rstrip("\n").split("\t")
-        if len(parts) < 3:
+    hits: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 4:
             continue
         try:
-            pid = float(parts[2])
+            passed = float(fields[2]) >= identity and float(fields[3]) >= query_coverage
         except ValueError:
             continue
-        if pid >= identity:
-            qid, sid = parts[0], parts[1]
-            if qid not in hits:  # count each read only once
-                hits[qid] = sid
-
-    p3.stdout.close()
-
-    # Check all subprocesses ended successfully
-    for proc in (p1, p2, p3):
-        proc.wait()
-        if proc.returncode not in (0, None):
-            raise RuntimeError(f"Subprocess failed: {proc.args} (rc={proc.returncode})")
-
-    total_hits = len(hits)
-    bac_hits = sum(1 for sid in hits.values() if str(sid).startswith("bacteria_"))
-    arch_hits = sum(1 for sid in hits.values() if str(sid).startswith("archaea_"))
-    percent_hits = 100.0 * total_hits / max(1, nreads)
-    is_amplicon = "YES" if percent_hits >= 50.0 else "NO"
-
+        if passed:
+            hits.setdefault(fields[0], fields[1])
+    bacterial = sum(subject.lower().startswith("bacteria_") for subject in hits.values())
+    archaeal = sum(subject.lower().startswith("archaea_") for subject in hits.values())
+    percent = 100.0 * len(hits) / sampled
     return {
-        "sample_id": sample_name,
-        "bac_hits": bac_hits,
-        "arch_hits": arch_hits,
-        "total_hits": total_hits,
-        "total_percent": f"{percent_hits:.1f}",
-        "is_16S": is_amplicon,
+        "sample_id": fastq.name,
+        "bac_hits": bacterial,
+        "arch_hits": archaeal,
+        "total_hits": len(hits),
+        "total_percent": f"{percent:.3f}",
+        "is_16S": "YES" if percent >= hit_threshold else "NO",
     }
 
 
-# ---------------- Input & formatting helpers ----------------
-def gather_inputs(argv_inputs: List[str]) -> List[str]:
-    """Collect inputs; allow mixing '-' (stdin) and explicit file paths."""
-    files: List[str] = []
-    for tok in argv_inputs:
-        if tok == "-":
-            for line in sys.stdin:
-                line = line.strip()
-                if line:
-                    files.append(line)
-        else:
-            files.append(tok)
-    return files
+def gather_inputs(tokens: Iterable[str]) -> list[Path]:
+    inputs: list[Path] = []
+    for token in tokens:
+        values = (line.strip() for line in sys.stdin) if token == "-" else (token,)
+        inputs.extend(Path(value) for value in values if value)
+    return list(dict.fromkeys(inputs))
 
 
-def make_table_formatter(inputs: List[str]) -> Tuple[str, dict]:
-    """Compute column widths for a nicely aligned table."""
-    widths = {h: len(h) for h in HEADER}
-    if inputs:
-        max_sample_len = max(len(Path(f).name) for f in inputs)
-        widths["sample_id"] = max(widths["sample_id"], max_sample_len)
-    fmt = "  ".join("{%s:%ds}" % (h, widths[h]) for h in HEADER)
-    return fmt, widths
-
-
-# ------------------------------- Main -------------------------------
-def main():
-    ap = argparse.ArgumentParser(
-        description="16S amplicon checker (BLAST).",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples
---------
-1) Read list from stdin (shell globbing):
-   ls fq/*.fastq.gz | is_16s_amplicon.py - --threads 4 --concurrent 3 --nreads 1000
-
-2) Mixed inputs (stdin + explicit paths):
-   printf "fq/A.fastq.gz\\nfq/B.fastq.gz\\n" | is_16s_amplicon.py - fq/C.fastq.gz --format tsv
-
-3) Write results to file:
-   ls fq/*.gz | is_16s_amplicon.py - -o results/out.tsv --out-format tsv
-
-4) Join with upstream filters (paired-end only):
-   comm -12 <(ls fq | sed -E 's/(_[12])?\\.fastq\\.gz//' | sort -u) <(some_list | sort -u) \\
-   | awk '{printf "fq/%s_1.fastq.gz\\nfq/%s_2.fastq.gz\\n",$1,$1}' \\
-   | is_16s_amplicon.py - -t 4 -c 3 -n 500 --format csv
-""",
+def make_writer(handle: TextIO, output_format: str) -> csv.DictWriter:
+    return csv.DictWriter(
+        handle,
+        fieldnames=HEADER,
+        delimiter="\t" if output_format == "tsv" else ",",
+        lineterminator="\n",
     )
-    ap.add_argument("inputs", nargs="+", help="FASTQ paths; use '-' to read from stdin (can be mixed)")
-    ap.add_argument(
-        "-d", "--db",
-        default=BLASTn_16s_DB,
-        help=f"BLAST database prefix, {BLASTn_16s_DB}",
-    )
-    ap.add_argument("-n", "--nreads", type=int, default=100,
-                    help="Number of reads to sample per file (default: 100)")
-    ap.add_argument("-p", "--identity", type=float, default=60.0,
-                    help="Identity cutoff percent (default: 60)")
-    ap.add_argument("-t", "--threads", type=int, default=4,
-                    help="Threads PER JOB (per sample). Total threads ≈ threads * concurrent")
-    ap.add_argument("-c", "--concurrent", type=int, default=1,
-                    help="How many samples to process concurrently (default: 1)")
-    ap.add_argument("--format", choices=["table", "tsv", "csv"], default="table",
-                    help="STDOUT format (default: table)")
-    ap.add_argument("-o", "--output", default=None,
-                    help="Also write streamed results to this file (tsv/csv)")
-    ap.add_argument("--out-format", choices=["tsv", "csv"], default=None,
-                    help="Force output file format (defaults by extension)")
-    args = ap.parse_args()
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  is_16s_amplicon.py sample.fastq.gz\n"
+            "  printf 'a.fastq.gz\\nb.fastq.gz\\n' | is_16s_amplicon.py - -c 4 --format tsv\n"
+            "\nInterpretation: this is a conservative content screen, not taxonomic assignment. "
+            "For low-diversity or highly divergent environmental samples, inspect the hit table "
+            "before excluding data."
+        ),
+    )
+    parser.add_argument("inputs", nargs="+", help="FASTQ paths; '-' reads paths from stdin")
+    parser.add_argument("-d", "--db", type=Path, default=DEFAULT_DB, help="BLAST database prefix")
+    parser.add_argument("-n", "--nreads", type=int, default=100, help="Maximum reads sampled per FASTQ")
+    parser.add_argument("-p", "--identity", type=float, default=70.0, help="Minimum nucleotide identity percent")
+    parser.add_argument("-q", "--query-coverage", type=float, default=70.0, help="Minimum query coverage percent")
+    parser.add_argument("--hit-threshold", type=float, default=50.0, help="Percent of sampled reads with hits required for YES")
+    parser.add_argument("-t", "--threads", type=int, default=1, help="BLAST threads per FASTQ")
+    parser.add_argument("-c", "--concurrent", type=int, default=1, help="FASTQ files processed concurrently")
+    parser.add_argument("--format", choices=("table", "tsv", "csv"), default="table", help="Standard-output format")
+    parser.add_argument("-o", "--output", type=Path, help="Optional TSV/CSV output path")
+    parser.add_argument("--out-format", choices=("tsv", "csv"), help="Output-file format; inferred from suffix otherwise")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    args = parser.parse_args()
+    if args.nreads < 1 or args.threads < 1 or args.concurrent < 1:
+        parser.error("--nreads, --threads, and --concurrent must be >= 1")
+    for name in ("identity", "query_coverage", "hit_threshold"):
+        if not 0 <= getattr(args, name) <= 100:
+            parser.error(f"--{name.replace('_', '-')} must be between 0 and 100")
+    return args
+
+
+def main() -> int:
+    args = parse_args()
+    if shutil.which("blastn") is None:
+        print("error: blastn is not installed or not in PATH", file=sys.stderr)
+        return 127
+    if not database_exists(args.db):
+        print(f"error: BLAST database not found for prefix {args.db}", file=sys.stderr)
+        return 2
     files = gather_inputs(args.inputs)
     if not files:
-        sys.exit("No input files.")
+        print("error: no input paths were provided", file=sys.stderr)
+        return 2
+    missing = [str(path) for path in files if not path.is_file()]
+    if missing:
+        print("error: FASTQ file(s) not found: " + ", ".join(missing), file=sys.stderr)
+        return 2
 
-    script_dir = Path(__file__).resolve().parent
-    BLASTn_DB = args.db
-    file_path = Path(BLASTn_DB + ".nhr") 
-    if not file_path.exists():
-        sys.exit(f"BLAST DB not found: {BLASTn_DB}")
+    worker = lambda path: run_screen(
+        path, args.db, args.nreads, args.identity, args.query_coverage,
+        args.hit_threshold, args.threads
+    )
+    with ThreadPoolExecutor(max_workers=min(args.concurrent, len(files))) as executor:
+        results = list(executor.map(worker, files))
 
-    # Concurrency: threads_per_job = args.threads (per sample)
-    concurrent = max(1, args.concurrent)
-    threads_per_job = max(1, args.threads)
-
-    # STDOUT writer
-    out_writer = None
-    fmt = None
-    if args.format == "tsv":
-        out_writer = csv.DictWriter(sys.stdout, fieldnames=HEADER, delimiter="\t", lineterminator="\n")
-        out_writer.writeheader(); sys.stdout.flush()
-    elif args.format == "csv":
-        out_writer = csv.DictWriter(sys.stdout, fieldnames=HEADER, lineterminator="\n")
-        out_writer.writeheader(); sys.stdout.flush()
-    else:  # aligned table
-        fmt, _ = make_table_formatter(files)
-        print(fmt.format(**{h: h for h in HEADER}), flush=True)
-
-    # Optional file writer
-    file_writer = None
-    f_handle = None
-    if args.output:
-        out_path = Path(args.output)
-        file_fmt = args.out_format if args.out_format else ("tsv" if out_path.suffix.lower() == ".tsv" else "csv")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        f_handle = out_path.open("w", newline="")
-        if file_fmt == "tsv":
-            file_writer = csv.DictWriter(f_handle, fieldnames=HEADER, delimiter="\t", lineterminator="\n")
-        else:
-            file_writer = csv.DictWriter(f_handle, fieldnames=HEADER, lineterminator="\n")
-        file_writer.writeheader()
-
-    # Run concurrently, print results as soon as ready
+    file_handle: TextIO | None = None
     try:
-        with ThreadPoolExecutor(max_workers=concurrent) as ex:
-            fut2file = {
-                ex.submit(
-                    run_blast_stream,
-                    Path(fq),
-                    args.db,
-                    args.nreads,
-                    args.identity,
-                    threads_per_job,
-                ): fq
-                for fq in files
-            }
+        file_writer = None
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            file_handle = args.output.open("w", encoding="utf-8", newline="")
+            file_format = args.out_format or ("tsv" if args.output.suffix.lower() == ".tsv" else "csv")
+            file_writer = make_writer(file_handle, file_format)
+            file_writer.writeheader()
 
-            for fut in as_completed(fut2file):
-                res = fut.result()
-
-                # print to STDOUT
-                if args.format == "table":
-                    print(fmt.format(**{h: str(res[h]) for h in HEADER}), flush=True)
-                else:
-                    out_writer.writerow(res); sys.stdout.flush()
-
-                # also write to file
+        if args.format in {"tsv", "csv"}:
+            stdout_writer = make_writer(sys.stdout, args.format)
+            stdout_writer.writeheader()
+            for result in results:
+                stdout_writer.writerow(result)
                 if file_writer:
-                    file_writer.writerow(res)
-                    f_handle.flush()
+                    file_writer.writerow(result)
+        else:
+            widths = {field: max(len(field), *(len(str(row[field])) for row in results)) for field in HEADER}
+            template = "  ".join(f"{{{field}:<{widths[field]}}}" for field in HEADER)
+            print(template.format(**{field: field for field in HEADER}))
+            for result in results:
+                print(template.format(**result))
+                if file_writer:
+                    file_writer.writerow(result)
     finally:
-        if f_handle:
-            f_handle.close()
+        if file_handle:
+            file_handle.close()
+    return 0
 
 
 if __name__ == "__main__":
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-    except Exception:
-        pass
-    main()
+    raise SystemExit(main())
