@@ -6,7 +6,7 @@ set -Eeuo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 root_dir="$(cd -- "$script_dir/.." && pwd -P)"
 
-for script in "$root_dir/setup.sh" "$script_dir"/*.sh; do
+for script in "$root_dir/setup.sh" "$script_dir/amplicon_analysis" "$script_dir"/*.sh; do
   bash -n "$script"
 done
 python3 -m compileall -q "$script_dir"
@@ -14,7 +14,7 @@ for script in "$script_dir"/*.R; do
   Rscript -e 'parse(file=commandArgs(TRUE)[1])' "$script" >/dev/null
 done
 
-bash "$script_dir/amplicon_pipeline.sh" --help >/dev/null
+bash "$script_dir/amplicon_analysis" --help >/dev/null
 python3 "$script_dir/is_16s_amplicon.py" --help >/dev/null
 python3 "$script_dir/fastq_dispatcher.py" --help >/dev/null
 python3 "$script_dir/get_ena_fq_url_by_sra.py" --help >/dev/null

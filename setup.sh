@@ -113,7 +113,7 @@ if [[ "$CHECK_ONLY" == false ]]; then
   mkdir -p -- "$PREFIX"
   for script in "$ROOT_DIR"/scripts/*; do
     [[ -f "$script" ]] || continue
-    case "$script" in *.py|*.R|*.sh) ;; *) continue ;; esac
+    case "$script" in */amplicon_analysis|*.py|*.R|*.sh) ;; *) continue ;; esac
     chmod 755 -- "$script"
     ln -sfn -- "$script" "$PREFIX/${script##*/}"
   done
@@ -125,4 +125,4 @@ if [[ "$CHECK_ONLY" == false ]]; then
 fi
 
 log "amplicon_analysis_hub setup complete"
-bash "$ROOT_DIR/scripts/amplicon_pipeline.sh" --version
+bash "$ROOT_DIR/scripts/amplicon_analysis" --version

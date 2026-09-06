@@ -73,6 +73,7 @@ bash setup.sh --check-only
 # Link commands into ~/.local/bin, the default prefix
 bash setup.sh
 export PATH="$HOME/.local/bin:$PATH"
+amplicon_analysis --version
 ```
 
 To use a custom command directory:
@@ -85,7 +86,7 @@ bash setup.sh --prefix "$HOME/bin"
 
 | Parameter | Default | Behavior |
 |---|---:|---|
-| `--prefix DIR` | `~/.local/bin` | Creates or updates symbolic links for `.sh`, `.py`, and `.R` files in `scripts/`. |
+| `--prefix DIR` | `~/.local/bin` | Creates or updates symbolic links for `amplicon_analysis` and the `.sh`, `.py`, and `.R` helpers in `scripts/`. |
 | `--check-only` | off | Checks dependencies without creating directories or links. |
 | `--build-16s-db` | off | Downloads bacterial and archaeal 16S loci from NCBI RefSeq, clusters them at 90% with `cd-hit-est`, and builds a BLAST database. Network access is required. |
 | `-h, --help` | — | Shows help. |
@@ -123,7 +124,7 @@ THREADS=8 MEMORY_MB=32000 bash setup.sh --build-16s-db
 ### Illumina or MGI paired-end 16S
 
 ```bash
-amplicon_pipeline.sh \
+amplicon_analysis \
   --input-dir raw_fastq \
   --output-dir run_16s \
   --marker 16s \
@@ -139,7 +140,7 @@ When the bundled GTDB training FASTA is present, `--classifier auto` automatical
 ### Illumina or MGI paired-end ITS
 
 ```bash
-amplicon_pipeline.sh \
+amplicon_analysis \
   -i raw_fastq -o run_its \
   -M its -p mgi -m pe \
   -1 _R1.fastq.gz -2 _R2.fastq.gz \
@@ -153,7 +154,7 @@ The ITS profile uses `truncLenF/R=0`, preventing systematic loss of genuine shor
 ### PacBio CCS full-length 16S
 
 ```bash
-amplicon_pipeline.sh \
+amplicon_analysis \
   -i ccs_fastq -o run_ccs \
   -M 16s -p pacbio_ccs -m se \
   -1 .fastq.gz -t 12
@@ -164,7 +165,7 @@ PacBio and Nanopore profiles default to `--fastp no`. Primer removal and DADA2 l
 ### Inspect a resolved profile without running the workflow
 
 ```bash
-amplicon_pipeline.sh -M its -p pacbio_ccs -m se --print-profile
+amplicon_analysis -M its -p pacbio_ccs -m se --print-profile
 ```
 
 ## Input conventions
@@ -258,7 +259,7 @@ The default `data/16s_primer.tsv` and `data/its_primer.tsv` files are broad cand
 
 ## Complete main-workflow parameters
 
-Command: `amplicon_pipeline.sh`. Hyphenated long options are recommended. Selected underscore aliases remain available for compatibility with historical commands.
+Command: `amplicon_analysis`. Hyphenated long options are recommended. Selected underscore aliases remain available for compatibility with historical commands.
 
 ### Input, profile, and resources
 
