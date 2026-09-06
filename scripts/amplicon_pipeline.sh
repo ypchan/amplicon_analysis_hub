@@ -9,7 +9,10 @@ shopt -s nullglob
 ORIGINAL_ARGS=("$@")
 
 VERSION="2.0.0"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# setup.sh installs this command as a symlink. Resolve that link before looking
+# for bundled primers, classifiers, and helper scripts.
+SCRIPT_PATH="$(realpath -- "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 
 THREADS=4
@@ -39,8 +42,7 @@ FORCE=false
 PRINT_PROFILE=false
 declare -a DADA_OVERRIDES=()
 
-usage() {
-  local status="${1:-0}"
+usage_text() {
   cat <<'EOF'
 amplicon_analysis_hub: end-to-end 16S/ITS ASV workflow
 
@@ -59,13 +61,15 @@ Profile selection:
                               .fastq.gz for SE)
   -2, --r2-suffix STR         R2 suffix (default: _2.fastq.gz)
   -t, --threads INT           Total concurrent CPU budget (default: 4)
-  -o, --output-dir DIR        Run directory; must not overlap the input tree
+  -o, --output-dir DIR        Run directory; may contain the input directory,
+                              but cannot equal it or be located inside it
                               (default: amplicon_analysis_results)
 
 Primer handling:
       --primer-file FILE      TSV: direction, name, sequence, region.
                               auto => data/16s_primer.tsv or data/its_primer.tsv
       --primer-mode trim|none Cutadapt primer/read-through removal (default: trim)
+      --skip-cutadapt         Skip Cutadapt (alias for --primer-mode none)
       --discard-untrimmed     Keep only reads/pairs with a configured primer match
                               (default: off; avoids ecological primer-selection bias)
       --cutadapt-error NUM    Maximum primer error rate (default: 0.10)
@@ -127,6 +131,33 @@ Examples:
     -c unite_trainset.fa.gz
   amplicon_pipeline.sh -i ccs -M 16s -p pacbio_ccs -m se -1 .fastq.gz
 EOF
+}
+
+usage() {
+  local status="${1:-0}" line line_number=0
+  local color_title='' color_section='' color_option='' color_reset=''
+  if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" ]]; then
+    color_title=$'\033[1;36m'
+    color_section=$'\033[1;33m'
+    color_option=$'\033[1;32m'
+    color_reset=$'\033[0m'
+  fi
+  if [[ -z "$color_reset" ]]; then
+    usage_text
+  else
+    while IFS= read -r line; do
+      line_number=$((line_number + 1))
+      if ((line_number == 1)); then
+        printf '%s%s%s\n' "$color_title" "$line" "$color_reset"
+      elif [[ "$line" =~ ^[^[:space:]].*:$ ]]; then
+        printf '%s%s%s\n' "$color_section" "$line" "$color_reset"
+      elif [[ "$line" =~ ^[[:space:]]+- ]]; then
+        printf '%s%s%s%s\n' "$color_option" "${line:0:30}" "$color_reset" "${line:30}"
+      else
+        printf '%s\n' "$line"
+      fi
+    done < <(usage_text)
+  fi
   exit "$status"
 }
 
@@ -140,7 +171,7 @@ blast_db_exists() {
   [[ -f "$1.nhr" || -f "$1.ndb" || -f "$1.00.nhr" ]]
 }
 
-parsed="$(getopt -o i:o:M:p:m:1:2:t:c:hV -l input-dir:,input_dir:,output-dir:,output_dir:,marker:,platform:,mode:,r1-suffix:,r1_suffix:,r2-suffix:,r2_suffix:,threads:,primer-file:,primer_file:,primer-mode:,discard-untrimmed,cutadapt-error:,cutadapt-overlap:,screen:,screen-action:,blast-db:,fastp:,fastp-min-length:,fastp-qualified:,fastp-unqualified:,pool:,trunc-len-f:,trunc-len-r:,trim-left:,max-ee-f:,max-ee-r:,trunc-q:,min-q:,min-len:,max-len:,learn-nbases:,min-overlap:,max-mismatch:,chimera:,keep-filtered,classifier:,min-boot:,cleanup:,print-profile,force,help,version -- "$@")" || usage 2
+parsed="$(getopt -o i:o:M:p:m:1:2:t:c:hV -l input-dir:,input_dir:,output-dir:,output_dir:,marker:,platform:,mode:,r1-suffix:,r1_suffix:,r2-suffix:,r2_suffix:,threads:,primer-file:,primer_file:,primer-mode:,skip-cutadapt,discard-untrimmed,cutadapt-error:,cutadapt-overlap:,screen:,screen-action:,blast-db:,fastp:,fastp-min-length:,fastp-qualified:,fastp-unqualified:,pool:,trunc-len-f:,trunc-len-r:,trim-left:,max-ee-f:,max-ee-r:,trunc-q:,min-q:,min-len:,max-len:,learn-nbases:,min-overlap:,max-mismatch:,chimera:,keep-filtered,classifier:,min-boot:,cleanup:,print-profile,force,help,version -- "$@")" || usage 2
 eval "set -- $parsed"
 while true; do
   case "$1" in
@@ -154,6 +185,7 @@ while true; do
     -t|--threads) THREADS="$2"; shift 2 ;;
     --primer-file|--primer_file) PRIMER_FILE="$2"; shift 2 ;;
     --primer-mode) PRIMER_MODE="$2"; shift 2 ;;
+    --skip-cutadapt) PRIMER_MODE="none"; shift ;;
     --discard-untrimmed) DISCARD_UNTRIMMED=true; shift ;;
     --cutadapt-error) CUTADAPT_ERROR_RATE="$2"; shift 2 ;;
     --cutadapt-overlap) CUTADAPT_OVERLAP="$2"; shift 2 ;;
@@ -232,8 +264,7 @@ INPUT_DIR="$(cd -- "$INPUT_DIR" && pwd -P)"
 require_command realpath
 OUTPUT_DIR="$(realpath -m -- "$OUTPUT_DIR")"
 [[ "$OUTPUT_DIR" != "/" ]] || die "--output-dir cannot be the filesystem root"
-case "$OUTPUT_DIR/" in "$INPUT_DIR/"*) die "--output-dir cannot be inside --input-dir" ;; esac
-case "$INPUT_DIR/" in "$OUTPUT_DIR/"*) die "--input-dir cannot be inside --output-dir" ;; esac
+case "$OUTPUT_DIR/" in "$INPUT_DIR/"*) die "--output-dir cannot equal or be inside --input-dir" ;; esac
 mkdir -p -- "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd -- "$OUTPUT_DIR" && pwd -P)"
 if [[ "$FORCE" == false && -f "$OUTPUT_DIR/amplicon_analysis_hub.finished" ]]; then

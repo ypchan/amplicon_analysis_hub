@@ -58,11 +58,23 @@ if bash "$root/scripts/amplicon_pipeline.sh" -i "$work/path_guard/input" \
   echo "nested output path was not rejected" >&2
   exit 1
 fi
-if bash "$root/scripts/amplicon_pipeline.sh" -i "$work/path_guard/output/input" \
-  -o "$work/path_guard/output" -m se -1 .fastq.gz --primer-mode none \
-  --fastp no --screen no -c none >/dev/null 2>&1; then
-  echo "output containing the input path was not rejected" >&2
-  exit 1
-fi
+
+# The project run directory may safely contain a read-only input subdirectory.
+# Invoke through a symlink too, matching setup.sh, to verify that bundled data
+# paths are resolved relative to the real script rather than the install prefix.
+mkdir -p "$work/path_guard/bin"
+ln -s "$root/scripts/amplicon_pipeline.sh" "$work/path_guard/bin/amplicon_pipeline.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$work/path_guard/bin/seqkit"
+printf '#!/usr/bin/env bash\nout=""\nwhile (($#)); do\n  case "$1" in\n    --output_dir|-o) out="$2"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nif [[ -n "$out" ]]; then mkdir -p -- "$out"; printf stub > "$out/seqtab.nochim.rds"; fi\n' \
+  > "$work/path_guard/bin/Rscript"
+chmod 755 "$work/path_guard/bin/seqkit" "$work/path_guard/bin/Rscript"
+PATH="$work/path_guard/bin:$PATH" "$work/path_guard/bin/amplicon_pipeline.sh" \
+  -i "$work/path_guard/output/input" -o "$work/path_guard/output" -M its \
+  -m se -1 .fastq.gz --skip-cutadapt --fastp no --screen no -c none \
+  --cleanup none >/dev/null
+[[ -f "$work/path_guard/output/input/sample.fastq.gz" ]]
+[[ -s "$work/path_guard/output/amplicon_analysis_hub.finished" ]]
+grep -Fq $'primer_file\t'"$root/data/its_primer.tsv" "$work/path_guard/output/run_parameters.tsv"
+[[ ! -e "$work/path_guard/output/02_cutadapt" ]]
 
 printf 'Helper integration tests passed.\n'

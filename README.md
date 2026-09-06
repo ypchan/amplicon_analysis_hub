@@ -252,7 +252,7 @@ fastp performs basic read-level QC. Cutadapt handles adapters and primers, while
 | Discard untrimmed | disabled | Avoids ecological or study-source selection bias when the broad primer list does not cover every library. |
 | Cores per sample | 1 | Total `--threads` controls sample-level concurrency. |
 
-For PE data, R1 searches for an anchored forward 5' primer and reverse-primer reverse-complement read-through. R2 uses the symmetric configuration. SE reads search for forward and reverse primers plus their read-through sequences. If a sequencing center has already removed primers reliably, use `--primer-mode none`.
+For PE data, R1 searches for an anchored forward 5' primer and reverse-primer reverse-complement read-through. R2 uses the symmetric configuration. SE reads search for forward and reverse primers plus their read-through sequences. If a sequencing center has already removed primers reliably, use `--skip-cutadapt` (equivalent to `--primer-mode none`).
 
 The default `data/16s_primer.tsv` and `data/its_primer.tsv` files are broad candidate collections intended for heterogeneous public data. When the experimental primer pair is known, use a study-specific TSV containing only that pair to reduce non-specific trimming.
 
@@ -265,7 +265,7 @@ Command: `amplicon_pipeline.sh`. Hyphenated long options are recommended. Select
 | Parameter | Default | Detailed behavior |
 |---|---:|---|
 | `-i, --input-dir DIR` | required | Directory of demultiplexed FASTQs. The main workflow never writes to or deletes from it. |
-| `-o, --output-dir DIR` | `amplicon_analysis_results` | Root for logs, intermediates, state, and results. It cannot equal the input directory, be inside it, or contain it. |
+| `-o, --output-dir DIR` | `amplicon_analysis_results` | Root for logs, intermediates, state, and results. It may contain the read-only input directory (for example, output `.` with input `00_fq`), but it cannot equal the input directory or be located inside it. |
 | `-M, --marker` | `16s` | `16s`, `its`, or `other`; controls lengths, primers, screening, and the automatic classifier policy. |
 | `-p, --platform` | `illumina` | Supported platforms are listed above. `bgi/bgiseq/mgiseq/dnbseq` normalize to `mgi`; `pacbio/ccs/hifi` normalize to `pacbio_ccs`; `ont` normalizes to `nanopore`. |
 | `-m, --mode` | `auto` | `auto`, `pe`, or `se`. Long-read, Ion Torrent, and 454 modes accept SE only. |
@@ -279,7 +279,7 @@ Command: `amplicon_pipeline.sh`. Hyphenated long options are recommended. Select
 | Parameter | Default | Detailed behavior |
 |---|---:|---|
 | `--primer-file FILE` | `auto` | 16S uses `data/16s_primer.tsv`; ITS uses `data/its_primer.tsv`; other uses none. |
-| `--primer-mode` | `trim` | `trim` or `none`. |
+| `--primer-mode` | `trim` | `trim` or `none`. `--skip-cutadapt` is a flag alias for `--primer-mode none`. |
 | `--discard-untrimmed` | off | Cutadapt discards reads or pairs without a configured primer match. This can alter community composition and should be used only when primer identity and orientation are known. |
 | `--cutadapt-error NUM` | 0.10 | Passed to Cutadapt as `-e`. |
 | `--cutadapt-overlap INT` | 10 | Passed to Cutadapt as `-O`. |
